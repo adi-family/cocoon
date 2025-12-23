@@ -220,7 +220,7 @@ async fn collect_output_files(dir: &str) -> Vec<OutputFile> {
 
         match tokio::fs::read(path).await {
             Ok(content) => {
-                let is_binary = content.iter().any(|&b| b == 0);
+                let is_binary = content.contains(&0);
                 let content_str = if is_binary {
                     base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &content)
                 } else {
