@@ -492,6 +492,7 @@ async fn main() {
     // Register with signaling server using secret
     // Server derives deterministic device_id from secret (persistent sessions)
     // Send device_id on reconnect for verification (prevents secret theft attacks)
+    let secret_for_claiming = secret.clone(); // Keep for displaying claiming instructions
     let register_msg = SignalingMessage::Register {
         secret,
         device_id: device_id.clone(),
@@ -545,6 +546,15 @@ async fn main() {
             SignalingMessage::Registered { device_id: assigned_id } => {
                 tracing::info!("✅ Registration confirmed");
                 tracing::info!("🆔 Device ID: {}", assigned_id);
+                tracing::info!("");
+                tracing::info!("📋 To claim ownership:");
+                tracing::info!("   Anyone with this secret can become an owner (co-ownership supported)");
+                tracing::info!("");
+                tracing::info!("   WebSocket message:");
+                tracing::info!(r#"   {{ "type": "claim_cocoon", "device_id": "{}", "secret": "{}", "access_token": "YOUR_TOKEN" }}"#, assigned_id, secret_for_claiming);
+                tracing::info!("");
+                tracing::info!("   ⚠️  Share this secret only with trusted co-owners!");
+                tracing::info!("");
 
                 // Save device_id for future reconnections (enables verification)
                 save_device_id(&assigned_id).await;
