@@ -16,6 +16,7 @@ use uuid::Uuid;
 const OUTPUT_DIR: &str = "/cocoon/output";
 const RESPONSE_PATH: &str = "/cocoon/output/response.json";
 const SECRET_PATH: &str = "/cocoon/.secret";
+const DEVICE_ID_PATH: &str = "/cocoon/.device_id";
 
 // Secret security requirements
 const MIN_SECRET_LENGTH: usize = 32;
@@ -364,8 +365,38 @@ fn generate_strong_secret() -> String {
         .collect()
 }
 
+/// Load device ID from file if it exists
+async fn load_device_id() -> Option<String> {
+    match tokio::fs::read_to_string(DEVICE_ID_PATH).await {
+        Ok(device_id) => {
+            let device_id = device_id.trim().to_string();
+            if device_id.is_empty() {
+                None
+            } else {
+                tracing::info!("📱 Loaded existing device ID from {}", DEVICE_ID_PATH);
+                Some(device_id)
+            }
+        }
+        Err(_) => None,
+    }
+}
+
+/// Save device ID to file for future reconnections
+async fn save_device_id(device_id: &str) {
+    if let Err(e) = tokio::fs::write(DEVICE_ID_PATH, device_id).await {
+        tracing::warn!("⚠️ Could not save device ID to {}: {}", DEVICE_ID_PATH, e);
+        tracing::warn!("💡 Mount volume at /cocoon for persistent device ID");
+    } else {
+        tracing::info!("💾 Saved device ID to {} for reconnection verification", DEVICE_ID_PATH);
+    }
+}
+
 /// Load or generate client secret for persistent device ID
-async fn get_or_create_secret() -> String {
+/// Returns (secret, optional_device_id)
+async fn get_or_create_secret() -> (String, Option<String>) {
+    // Load device_id if it exists (for reconnection verification)
+    let device_id = load_device_id().await;
+
     // Try environment variable first (for manual management)
     if let Ok(secret) = std::env::var("COCOON_SECRET") {
         tracing::info!("📋 Using secret from COCOON_SECRET environment variable");
@@ -381,7 +412,7 @@ async fn get_or_create_secret() -> String {
             std::process::exit(1);
         }
 
-        return secret;
+        return (secret, device_id);
     }
 
     // Try loading from file
@@ -394,10 +425,12 @@ async fn get_or_create_secret() -> String {
                 tracing::error!("❌ Invalid secret from {}: {}", SECRET_PATH, e);
                 tracing::error!("💡 Deleting weak secret and generating new one");
                 let _ = tokio::fs::remove_file(SECRET_PATH).await;
+                // Also delete device_id since secret changed
+                let _ = tokio::fs::remove_file(DEVICE_ID_PATH).await;
                 // Fall through to generate new secret
             } else {
                 tracing::info!("🔑 Loaded existing secret from {}", SECRET_PATH);
-                return secret;
+                return (secret, device_id);
             }
         }
         Err(_) => {
@@ -418,7 +451,8 @@ async fn get_or_create_secret() -> String {
         tracing::info!("💾 Saved secret to {} for persistent sessions", SECRET_PATH);
     }
 
-    secret
+    // New secret means no device_id yet (first registration)
+    (secret, None)
 }
 
 #[tokio::main]
@@ -432,8 +466,8 @@ async fn main() {
 
     tracing::info!("🐛 Cocoon starting");
 
-    // Get or create client secret for persistent device ID
-    let secret = get_or_create_secret().await;
+    // Get or create client secret and load device ID (for reconnection verification)
+    let (secret, device_id) = get_or_create_secret().await;
 
     let signaling_url = std::env::var("SIGNALING_SERVER_URL")
         .unwrap_or_else(|_| "ws://localhost:8080/ws".to_string());
@@ -457,7 +491,11 @@ async fn main() {
 
     // Register with signaling server using secret
     // Server derives deterministic device_id from secret (persistent sessions)
-    let register_msg = SignalingMessage::Register { secret };
+    // Send device_id on reconnect for verification (prevents secret theft attacks)
+    let register_msg = SignalingMessage::Register {
+        secret,
+        device_id: device_id.clone(),
+    };
 
     {
         let mut w = writer.lock().await;
@@ -470,7 +508,11 @@ async fn main() {
         }
     }
 
-    tracing::info!("⏳ Waiting for derived device ID (persistent session)...");
+    if device_id.is_some() {
+        tracing::info!("⏳ Reconnecting with device ID verification...");
+    } else {
+        tracing::info!("⏳ Waiting for derived device ID (first registration)...");
+    }
 
     // Main message loop
     while let Some(msg_result) = read.next().await {
@@ -500,9 +542,12 @@ async fn main() {
         };
 
         match message {
-            SignalingMessage::Registered { device_id } => {
+            SignalingMessage::Registered { device_id: assigned_id } => {
                 tracing::info!("✅ Registration confirmed");
-                tracing::info!("🆔 Assigned device ID: {}", device_id);
+                tracing::info!("🆔 Device ID: {}", assigned_id);
+
+                // Save device_id for future reconnections (enables verification)
+                save_device_id(&assigned_id).await;
             }
 
             SignalingMessage::SyncData { payload } => {

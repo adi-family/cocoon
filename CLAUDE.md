@@ -34,9 +34,12 @@ cocoon, containerized-worker, signaling-server, remote-execution, websocket, pty
 
 ### How It Works
 1. **Cocoon generates/loads secret**: Strong secret stored in `/cocoon/.secret` or `COCOON_SECRET` env var
-2. **Sends secret to server**: During registration
+2. **First registration**: Sends `Register { secret, device_id: None }` to server
 3. **Server derives device ID**: `HMAC-SHA256(secret, salt)` → deterministic device ID
-4. **Persistent sessions**: Same secret = same device ID across restarts
+4. **Cocoon saves device ID**: Stores in `/cocoon/.device_id` for verification
+5. **Reconnection**: Sends `Register { secret, device_id: Some(saved_id) }` to server
+6. **Server verifies**: Checks that `saved_id == HMAC-SHA256(secret, salt)`
+7. **Security**: If mismatch → rejects connection (prevents stolen secret attacks)
 
 ### Secret Strength Requirements
 **CRITICAL**: Secrets MUST be cryptographically strong. Both client and server enforce this.
@@ -60,6 +63,21 @@ openssl rand -base64 36
 - Client with `COCOON_SECRET`: Validates on startup, exits if weak
 - Client with file secret: Regenerates if weak, saves new strong secret
 - Server: Rejects registration with error message about weak secret
+
+### Device ID Verification (Anti-Theft Protection)
+**Why device_id verification matters**:
+- Without it: Attacker steals secret → registers new device → gets same device_id → intercepts traffic
+- With it: Attacker steals secret → tries to register → server rejects (device_id doesn't match)
+
+**How it works**:
+- First connection: `device_id = None` → server assigns ID → cocoon saves to `/cocoon/.device_id`
+- Reconnection: `device_id = Some(saved)` → server verifies `saved == HMAC(secret)` → rejects if mismatch
+- Result: Even if secret is stolen, attacker can't impersonate the original device
+
+**Files created**:
+- `/cocoon/.secret` - Cryptographically strong secret (48 chars)
+- `/cocoon/.device_id` - Server-assigned device ID (HMAC-derived from secret)
+- Both must be stolen together to impersonate a device (harder attack)
 
 ### Secret Storage Options
 - **File (persistent)**: `/cocoon/.secret` - mount volume for persistence
@@ -205,25 +223,32 @@ docker-compose up
 
 ## Expected Output
 
-When cocoon starts successfully (with new secret):
+When cocoon starts successfully (first time):
 ```
 🐛 Cocoon starting
 🆕 Generated new strong secret (48 characters, 288 bits entropy)
 💾 Saved secret to /cocoon/.secret for persistent sessions
 🔗 Connecting to signaling server: ws://localhost:8080/ws
-⏳ Waiting for derived device ID (persistent session)...
+⏳ Waiting for derived device ID (first registration)...
 ✅ Registration confirmed
-🆔 Assigned device ID: a1b2c3d4e5f6... (HMAC-derived from secret)
+🆔 Device ID: a1b2c3d4e5f6... (HMAC-derived from secret)
+💾 Saved device ID to /cocoon/.device_id for reconnection verification
 ```
 
-When cocoon restarts (with existing secret):
+When cocoon restarts (with existing secret + device_id):
 ```
 🐛 Cocoon starting
 🔑 Loaded existing secret from /cocoon/.secret
+📱 Loaded existing device ID from /cocoon/.device_id
 🔗 Connecting to signaling server: ws://localhost:8080/ws
-⏳ Waiting for derived device ID (persistent session)...
+⏳ Reconnecting with device ID verification...
 ✅ Registration confirmed
-🆔 Assigned device ID: a1b2c3d4e5f6... (same ID as before!)
+🆔 Device ID: a1b2c3d4e5f6... (verified - secret matches!)
+```
+
+When attacker tries with stolen secret (but wrong device_id):
+```
+Server rejects with: "Registration rejected - device_id does not match secret. Possible stolen secret attack."
 ```
 
 ## Quick Test
