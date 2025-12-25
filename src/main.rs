@@ -1,6 +1,6 @@
 use futures::{SinkExt, StreamExt};
 use lib_tarminal_sync::SignalingMessage;
-use portable_pty::{CommandBuilder, PtySize, PtySystem};
+use portable_pty::{CommandBuilder, PtySize};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -489,13 +489,26 @@ async fn main() {
     let pty_sessions: Arc<Mutex<HashMap<Uuid, PtySession>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
-    // Register with signaling server using secret
-    // Server derives deterministic device_id from secret (persistent sessions)
-    // Send device_id on reconnect for verification (prevents secret theft attacks)
+    // Check for setup token (one-command install flow)
+    let setup_token = std::env::var("COCOON_SETUP_TOKEN").ok();
+    let cocoon_name = std::env::var("COCOON_NAME").ok();
+
+    // Register with signaling server
+    // If setup token provided: use RegisterWithSetupToken (auto-claims ownership)
+    // Otherwise: use Register (manual claiming required)
     let secret_for_claiming = secret.clone(); // Keep for displaying claiming instructions
-    let register_msg = SignalingMessage::Register {
-        secret,
-        device_id: device_id.clone(),
+    let register_msg = if let Some(ref token) = setup_token {
+        tracing::info!("🎫 Using setup token for auto-registration");
+        SignalingMessage::RegisterWithSetupToken {
+            secret,
+            setup_token: token.clone(),
+            name: cocoon_name.clone(),
+        }
+    } else {
+        SignalingMessage::Register {
+            secret,
+            device_id: device_id.clone(),
+        }
     };
 
     {
@@ -509,7 +522,9 @@ async fn main() {
         }
     }
 
-    if device_id.is_some() {
+    if setup_token.is_some() {
+        tracing::info!("⏳ Registering with setup token (auto-claim enabled)...");
+    } else if device_id.is_some() {
         tracing::info!("⏳ Reconnecting with device ID verification...");
     } else {
         tracing::info!("⏳ Waiting for derived device ID (first registration)...");
@@ -560,6 +575,24 @@ async fn main() {
                 save_device_id(&assigned_id).await;
             }
 
+            SignalingMessage::RegisteredWithOwner { device_id: assigned_id, owner_id, name } => {
+                tracing::info!("✅ Registration confirmed with auto-claim");
+                tracing::info!("🆔 Device ID: {}", assigned_id);
+                tracing::info!("👤 Owner: {}", owner_id);
+                if let Some(ref n) = name {
+                    tracing::info!("📛 Name: {}", n);
+                }
+                tracing::info!("");
+                tracing::info!("🎉 Cocoon is ready and claimed by your account!");
+                tracing::info!("");
+
+                // Save device_id for future reconnections
+                save_device_id(&assigned_id).await;
+
+                // Clear setup token from env (one-time use)
+                // Note: Can't actually clear env var, but we could delete from config
+            }
+
             SignalingMessage::SyncData { payload } => {
                 let request: CommandRequest = match serde_json::from_value(payload) {
                     Ok(req) => req,
@@ -573,10 +606,10 @@ async fn main() {
                 let sessions_clone = pty_sessions.clone();
 
                 tokio::spawn(async move {
-                    let response = match request {
+                    let response: Option<CommandResponse> = match request {
                         CommandRequest::Execute { command, input } => {
                             tracing::info!("🚀 Executing: {}", command);
-                            execute_command(&command, input.as_deref()).await
+                            Some(execute_command(&command, input.as_deref()).await)
                         }
 
                         CommandRequest::AttachPty { command, cols, rows, env } => {
@@ -585,12 +618,12 @@ async fn main() {
                             match create_pty_session(&command, cols, rows, &env, writer_clone.clone()).await {
                                 Ok((session_id, session)) => {
                                     sessions_clone.lock().await.insert(session_id, session);
-                                    CommandResponse::PtyCreated { session_id }
+                                    Some(CommandResponse::PtyCreated { session_id })
                                 }
-                                Err(e) => CommandResponse::Error {
+                                Err(e) => Some(CommandResponse::Error {
                                     code: "pty_create_failed".into(),
                                     message: e,
-                                },
+                                }),
                             }
                         }
 
@@ -599,18 +632,18 @@ async fn main() {
                             if let Some(session) = sessions.get(&session_id) {
                                 let mut writer = session.pair.master.take_writer().unwrap();
                                 if let Err(e) = std::io::Write::write_all(&mut writer, data.as_bytes()) {
-                                    CommandResponse::Error {
+                                    Some(CommandResponse::Error {
                                         code: "pty_write_failed".into(),
                                         message: e.to_string(),
-                                    }
+                                    })
                                 } else {
-                                    continue; // No response needed for input
+                                    None // No response needed for successful input
                                 }
                             } else {
-                                CommandResponse::Error {
+                                Some(CommandResponse::Error {
                                     code: "session_not_found".into(),
                                     message: format!("PTY session {} not found", session_id),
-                                }
+                                })
                             }
                         }
 
@@ -624,18 +657,18 @@ async fn main() {
                                     pixel_width: 0,
                                     pixel_height: 0,
                                 }) {
-                                    CommandResponse::Error {
+                                    Some(CommandResponse::Error {
                                         code: "resize_failed".into(),
                                         message: e.to_string(),
-                                    }
+                                    })
                                 } else {
-                                    continue; // No response needed for resize
+                                    None // No response needed for successful resize
                                 }
                             } else {
-                                CommandResponse::Error {
+                                Some(CommandResponse::Error {
                                     code: "session_not_found".into(),
                                     message: format!("PTY session {} not found", session_id),
-                                }
+                                })
                             }
                         }
 
@@ -645,35 +678,37 @@ async fn main() {
                             if let Some(mut session) = sessions.remove(&session_id) {
                                 let exit_status = session.child.wait().ok();
                                 let exit_code = exit_status
-                                    .and_then(|s| s.exit_code())
-                                    .unwrap_or(-1) as i32;
+                                    .map(|s| s.exit_code() as i32)
+                                    .unwrap_or(-1);
 
-                                CommandResponse::PtyExited {
+                                Some(CommandResponse::PtyExited {
                                     session_id,
                                     exit_code,
-                                }
+                                })
                             } else {
-                                CommandResponse::Error {
+                                Some(CommandResponse::Error {
                                     code: "session_not_found".into(),
                                     message: format!("PTY session {} not found", session_id),
-                                }
+                                })
                             }
                         }
                     };
 
-                    // Send response
-                    let response_msg = SignalingMessage::SyncData {
-                        payload: serde_json::to_value(&response).unwrap(),
-                    };
+                    // Send response (if any)
+                    if let Some(response) = response {
+                        let response_msg = SignalingMessage::SyncData {
+                            payload: serde_json::to_value(&response).unwrap(),
+                        };
 
-                    let mut w = writer_clone.lock().await;
-                    if let Err(e) = w
-                        .send(Message::Text(
-                            serde_json::to_string(&response_msg).unwrap(),
-                        ))
-                        .await
-                    {
-                        tracing::error!("❌ Failed to send response: {}", e);
+                        let mut w = writer_clone.lock().await;
+                        if let Err(e) = w
+                            .send(Message::Text(
+                                serde_json::to_string(&response_msg).unwrap(),
+                            ))
+                            .await
+                        {
+                            tracing::error!("❌ Failed to send response: {}", e);
+                        }
                     }
                 });
             }
