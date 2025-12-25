@@ -63,10 +63,109 @@ Then continuous: `{"type": "pty_output", "session_id": "uuid", "data": "...ANSI.
 ```
 Response: `{"type": "pty_exited", "session_id": "uuid", "exit_code": 0}`
 
-## Usage
+## Getting Started
+
+### Docker (Recommended)
+
+Build the image:
 ```bash
+cd crates/cocoon
 docker build -t cocoon .
-docker run -e SIGNALING_SERVER_URL=ws://server:8080/ws cocoon
+```
+
+Run with signaling server:
+```bash
+docker run \
+  -e SIGNALING_SERVER_URL=ws://your-signaling-server:8080/ws \
+  -e COCOON_ID=my-cocoon-1 \
+  cocoon
+```
+
+Run with default settings (localhost):
+```bash
+docker run cocoon
+# Uses ws://localhost:8080/ws by default
+```
+
+### Build from Source
+
+Build:
+```bash
+cd crates/cocoon
+cargo build --release
+```
+
+Run:
+```bash
+SIGNALING_SERVER_URL=ws://your-signaling-server:8080/ws \
+COCOON_ID=my-cocoon-1 \
+./target/release/cocoon
+```
+
+### Docker Compose (Full Stack)
+
+Create `docker-compose.yml`:
+```yaml
+version: '3.8'
+
+services:
+  # Signaling server
+  signaling:
+    image: ghcr.io/adi-family/tarminal-signaling-server:latest
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+
+  # Cocoon worker
+  cocoon:
+    build: ./crates/cocoon
+    environment:
+      - SIGNALING_SERVER_URL=ws://signaling:8080/ws
+      - COCOON_ID=worker-1
+    depends_on:
+      - signaling
+```
+
+Then:
+```bash
+docker-compose up
+```
+
+## Expected Output
+
+When cocoon starts successfully:
+```
+🐛 Cocoon starting
+🔗 Connecting to signaling server: ws://localhost:8080/ws
+🆔 Device ID: abc-123-def-456
+✅ Connected and waiting for commands...
+```
+
+## Quick Test
+
+1. Start signaling server:
+```bash
+cd crates/tarminal-signaling-server
+cargo run
+```
+
+2. Start cocoon (in another terminal):
+```bash
+cd crates/cocoon
+cargo run
+```
+
+3. Send a test command via WebSocket client:
+```json
+{
+  "type": "sync_data",
+  "payload": {
+    "type": "execute",
+    "command": "echo 'Hello from cocoon!'",
+    "input": null
+  }
+}
 ```
 
 ## Name Origin
