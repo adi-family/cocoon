@@ -324,10 +324,7 @@ async fn main() {
     let signaling_url = std::env::var("SIGNALING_SERVER_URL")
         .unwrap_or_else(|_| "ws://localhost:8080/ws".to_string());
 
-    let device_id = std::env::var("COCOON_ID").unwrap_or_else(|_| Uuid::new_v4().to_string());
-
     tracing::info!("🔗 Connecting to signaling server: {}", signaling_url);
-    tracing::info!("🆔 Device ID: {}", device_id);
 
     let (ws_stream, _) = match connect_async(&signaling_url).await {
         Ok(conn) => conn,
@@ -344,10 +341,8 @@ async fn main() {
     let pty_sessions: Arc<Mutex<HashMap<Uuid, PtySession>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
-    // Register with signaling server
-    let register_msg = SignalingMessage::Register {
-        device_id: device_id.clone(),
-    };
+    // Register with signaling server (server will assign device_id)
+    let register_msg = SignalingMessage::Register;
 
     {
         let mut w = writer.lock().await;
@@ -360,7 +355,7 @@ async fn main() {
         }
     }
 
-    tracing::info!("✅ Connected and waiting for commands...");
+    tracing::info!("⏳ Waiting for server-assigned device ID...");
 
     // Main message loop
     while let Some(msg_result) = read.next().await {
@@ -390,8 +385,9 @@ async fn main() {
         };
 
         match message {
-            SignalingMessage::Registered { .. } => {
+            SignalingMessage::Registered { device_id } => {
                 tracing::info!("✅ Registration confirmed");
+                tracing::info!("🆔 Assigned device ID: {}", device_id);
             }
 
             SignalingMessage::SyncData { payload } => {

@@ -23,14 +23,14 @@ cocoon, containerized-worker, signaling-server, remote-execution, websocket, pty
 
 ## Architecture
 - Connects to signaling server on startup via WebSocket
-- Registers with unique device ID (COCOON_ID or generated UUID)
+- Server assigns unique device ID automatically
 - Waits for command requests via SignalingMessage::SyncData
 - PTY output streams continuously to client
 - Terminal resize events sent from client to cocoon
 
 ## Environment Variables
 - SIGNALING_SERVER_URL: WebSocket URL of signaling server (default: ws://localhost:8080/ws)
-- COCOON_ID: Unique identifier for this cocoon instance (default: generated UUID)
+- RUST_LOG: Log level for debugging (e.g., cocoon=debug)
 
 ## Command Protocol
 
@@ -77,7 +77,6 @@ Run with signaling server:
 ```bash
 docker run \
   -e SIGNALING_SERVER_URL=ws://your-signaling-server:8080/ws \
-  -e COCOON_ID=my-cocoon-1 \
   cocoon
 ```
 
@@ -98,7 +97,6 @@ cargo build --release
 Run:
 ```bash
 SIGNALING_SERVER_URL=ws://your-signaling-server:8080/ws \
-COCOON_ID=my-cocoon-1 \
 ./target/release/cocoon
 ```
 
@@ -122,7 +120,6 @@ services:
     build: ./crates/cocoon
     environment:
       - SIGNALING_SERVER_URL=ws://signaling:8080/ws
-      - COCOON_ID=worker-1
     depends_on:
       - signaling
 ```
@@ -138,8 +135,9 @@ When cocoon starts successfully:
 ```
 🐛 Cocoon starting
 🔗 Connecting to signaling server: ws://localhost:8080/ws
-🆔 Device ID: abc-123-def-456
-✅ Connected and waiting for commands...
+⏳ Waiting for server-assigned device ID...
+✅ Registration confirmed
+🆔 Assigned device ID: abc-123-def-456
 ```
 
 ## Quick Test
