@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 const OUTPUT_DIR: &str = "/cocoon/output";
 const RESPONSE_PATH: &str = "/cocoon/output/response.json";
+const SECRET_PATH: &str = "/cocoon/.secret";
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -310,6 +311,39 @@ async fn create_pty_session(
     ))
 }
 
+/// Load or generate client secret for persistent device ID
+async fn get_or_create_secret() -> String {
+    // Try environment variable first (for manual management)
+    if let Ok(secret) = std::env::var("COCOON_SECRET") {
+        tracing::info!("📋 Using secret from COCOON_SECRET environment variable");
+        return secret;
+    }
+
+    // Try loading from file
+    match tokio::fs::read_to_string(SECRET_PATH).await {
+        Ok(secret) => {
+            let secret = secret.trim().to_string();
+            tracing::info!("🔑 Loaded existing secret from {}", SECRET_PATH);
+            secret
+        }
+        Err(_) => {
+            // Generate new secret
+            let secret = Uuid::new_v4().to_string();
+            tracing::info!("🆕 Generated new secret");
+
+            // Try to save it (may fail in read-only containers, that's ok)
+            if let Err(e) = tokio::fs::write(SECRET_PATH, &secret).await {
+                tracing::warn!("⚠️ Could not save secret to {} (ephemeral session): {}", SECRET_PATH, e);
+                tracing::warn!("💡 Set COCOON_SECRET env var or mount volume at /cocoon for persistent sessions");
+            } else {
+                tracing::info!("💾 Saved secret to {} for persistent sessions", SECRET_PATH);
+            }
+
+            secret
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -320,6 +354,9 @@ async fn main() {
         .init();
 
     tracing::info!("🐛 Cocoon starting");
+
+    // Get or create client secret for persistent device ID
+    let secret = get_or_create_secret().await;
 
     let signaling_url = std::env::var("SIGNALING_SERVER_URL")
         .unwrap_or_else(|_| "ws://localhost:8080/ws".to_string());
@@ -341,8 +378,9 @@ async fn main() {
     let pty_sessions: Arc<Mutex<HashMap<Uuid, PtySession>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
-    // Register with signaling server (server will assign device_id)
-    let register_msg = SignalingMessage::Register;
+    // Register with signaling server using secret
+    // Server derives deterministic device_id from secret (persistent sessions)
+    let register_msg = SignalingMessage::Register { secret };
 
     {
         let mut w = writer.lock().await;
@@ -355,7 +393,7 @@ async fn main() {
         }
     }
 
-    tracing::info!("⏳ Waiting for server-assigned device ID...");
+    tracing::info!("⏳ Waiting for derived device ID (persistent session)...");
 
     // Main message loop
     while let Some(msg_result) = read.next().await {
