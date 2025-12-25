@@ -1,6 +1,7 @@
 use futures::{SinkExt, StreamExt};
 use lib_tarminal_sync::SignalingMessage;
 use portable_pty::{CommandBuilder, PtySize, PtySystem};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Read;
@@ -15,6 +16,10 @@ use uuid::Uuid;
 const OUTPUT_DIR: &str = "/cocoon/output";
 const RESPONSE_PATH: &str = "/cocoon/output/response.json";
 const SECRET_PATH: &str = "/cocoon/.secret";
+
+// Secret security requirements
+const MIN_SECRET_LENGTH: usize = 32;
+const GENERATED_SECRET_LENGTH: usize = 48; // 288 bits of entropy
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -311,11 +316,71 @@ async fn create_pty_session(
     ))
 }
 
+/// Validate secret strength
+fn validate_secret(secret: &str) -> Result<(), String> {
+    if secret.len() < MIN_SECRET_LENGTH {
+        return Err(format!(
+            "Secret too short: {} characters (minimum: {})",
+            secret.len(),
+            MIN_SECRET_LENGTH
+        ));
+    }
+
+    // Check for obvious weak patterns
+    if secret.chars().all(|c| c.is_numeric()) {
+        return Err("Secret must not be only numbers".to_string());
+    }
+
+    if secret.to_lowercase() == secret && secret.chars().all(|c| c.is_alphabetic()) {
+        return Err("Secret must not be only lowercase letters".to_string());
+    }
+
+    if secret.chars().all(|c| c == secret.chars().next().unwrap()) {
+        return Err("Secret must not be repetitive characters".to_string());
+    }
+
+    // Check for common weak patterns
+    let lower = secret.to_lowercase();
+    let weak_patterns = ["password", "secret", "admin", "12345", "qwerty", "test"];
+    for pattern in &weak_patterns {
+        if lower.contains(pattern) {
+            return Err(format!("Secret contains weak pattern: {}", pattern));
+        }
+    }
+
+    Ok(())
+}
+
+/// Generate cryptographically strong random secret
+fn generate_strong_secret() -> String {
+    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut rng = rand::thread_rng();
+
+    (0..GENERATED_SECRET_LENGTH)
+        .map(|_| {
+            let idx = rng.gen_range(0..CHARSET.len());
+            CHARSET[idx] as char
+        })
+        .collect()
+}
+
 /// Load or generate client secret for persistent device ID
 async fn get_or_create_secret() -> String {
     // Try environment variable first (for manual management)
     if let Ok(secret) = std::env::var("COCOON_SECRET") {
         tracing::info!("📋 Using secret from COCOON_SECRET environment variable");
+
+        // Validate manual secret
+        if let Err(e) = validate_secret(&secret) {
+            tracing::error!("❌ Invalid secret from COCOON_SECRET: {}", e);
+            tracing::error!("💡 Secret requirements:");
+            tracing::error!("   - Minimum {} characters", MIN_SECRET_LENGTH);
+            tracing::error!("   - Must be random and unpredictable");
+            tracing::error!("   - Avoid common patterns, dictionary words");
+            tracing::error!("   - Use: openssl rand -base64 36");
+            std::process::exit(1);
+        }
+
         return secret;
     }
 
@@ -323,25 +388,37 @@ async fn get_or_create_secret() -> String {
     match tokio::fs::read_to_string(SECRET_PATH).await {
         Ok(secret) => {
             let secret = secret.trim().to_string();
-            tracing::info!("🔑 Loaded existing secret from {}", SECRET_PATH);
-            secret
+
+            // Validate loaded secret
+            if let Err(e) = validate_secret(&secret) {
+                tracing::error!("❌ Invalid secret from {}: {}", SECRET_PATH, e);
+                tracing::error!("💡 Deleting weak secret and generating new one");
+                let _ = tokio::fs::remove_file(SECRET_PATH).await;
+                // Fall through to generate new secret
+            } else {
+                tracing::info!("🔑 Loaded existing secret from {}", SECRET_PATH);
+                return secret;
+            }
         }
         Err(_) => {
-            // Generate new secret
-            let secret = Uuid::new_v4().to_string();
-            tracing::info!("🆕 Generated new secret");
-
-            // Try to save it (may fail in read-only containers, that's ok)
-            if let Err(e) = tokio::fs::write(SECRET_PATH, &secret).await {
-                tracing::warn!("⚠️ Could not save secret to {} (ephemeral session): {}", SECRET_PATH, e);
-                tracing::warn!("💡 Set COCOON_SECRET env var or mount volume at /cocoon for persistent sessions");
-            } else {
-                tracing::info!("💾 Saved secret to {} for persistent sessions", SECRET_PATH);
-            }
-
-            secret
+            // File doesn't exist, will generate new secret
         }
     }
+
+    // Generate new cryptographically strong secret
+    let secret = generate_strong_secret();
+    tracing::info!("🆕 Generated new cryptographically strong secret ({} chars, {} bits entropy)",
+        GENERATED_SECRET_LENGTH, GENERATED_SECRET_LENGTH * 6);
+
+    // Try to save it (may fail in read-only containers, that's ok)
+    if let Err(e) = tokio::fs::write(SECRET_PATH, &secret).await {
+        tracing::warn!("⚠️ Could not save secret to {} (ephemeral session): {}", SECRET_PATH, e);
+        tracing::warn!("💡 Set COCOON_SECRET env var or mount volume at /cocoon for persistent sessions");
+    } else {
+        tracing::info!("💾 Saved secret to {} for persistent sessions", SECRET_PATH);
+    }
+
+    secret
 }
 
 #[tokio::main]

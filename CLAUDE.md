@@ -33,10 +33,33 @@ cocoon, containerized-worker, signaling-server, remote-execution, websocket, pty
 ## Security & Persistent Sessions
 
 ### How It Works
-1. **Cocoon generates/loads secret**: UUID stored in `/cocoon/.secret` or `COCOON_SECRET` env var
+1. **Cocoon generates/loads secret**: Strong secret stored in `/cocoon/.secret` or `COCOON_SECRET` env var
 2. **Sends secret to server**: During registration
 3. **Server derives device ID**: `HMAC-SHA256(secret, salt)` → deterministic device ID
 4. **Persistent sessions**: Same secret = same device ID across restarts
+
+### Secret Strength Requirements
+**CRITICAL**: Secrets MUST be cryptographically strong. Both client and server enforce this.
+
+- **Minimum length**: 32 characters (server rejects shorter secrets)
+- **Auto-generated secrets**: 48 characters with 288 bits of entropy
+- **Character variety**: Must have at least 10 unique characters
+- **Rejected patterns**:
+  - Only numbers (e.g., "12345678901234567890123456789012")
+  - Only lowercase letters
+  - Repetitive characters (e.g., "aaaaaaaa...")
+  - Weak patterns: "password", "secret", "admin", "12345", "qwerty", "test", "example"
+
+**Generate strong secret manually**:
+```bash
+openssl rand -base64 36
+# Produces: e.g., "kX9mP2vR8nQ4sT6wY1zC3hF5jL7dN0bM9pK8gV4aS2="
+```
+
+**What happens with weak secrets**:
+- Client with `COCOON_SECRET`: Validates on startup, exits if weak
+- Client with file secret: Regenerates if weak, saves new strong secret
+- Server: Rejects registration with error message about weak secret
 
 ### Secret Storage Options
 - **File (persistent)**: `/cocoon/.secret` - mount volume for persistence
@@ -118,11 +141,12 @@ docker run \
 
 Run with manual secret (persistent):
 ```bash
+# Generate strong secret first: openssl rand -base64 36
 docker run \
   -e SIGNALING_SERVER_URL=ws://your-signaling-server:8080/ws \
-  -e COCOON_SECRET=my-secure-secret-uuid \
+  -e COCOON_SECRET="kX9mP2vR8nQ4sT6wY1zC3hF5jL7dN0bM9pK8gV4aS2=" \
   cocoon
-# Always gets same device ID from this secret
+# Always gets same device ID from this secret (must be 32+ chars)
 ```
 
 Run with default settings (localhost, ephemeral):
@@ -184,7 +208,7 @@ docker-compose up
 When cocoon starts successfully (with new secret):
 ```
 🐛 Cocoon starting
-🆕 Generated new secret
+🆕 Generated new strong secret (48 characters, 288 bits entropy)
 💾 Saved secret to /cocoon/.secret for persistent sessions
 🔗 Connecting to signaling server: ws://localhost:8080/ws
 ⏳ Waiting for derived device ID (persistent session)...
