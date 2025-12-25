@@ -8,5 +8,11 @@ COPY src ./src
 
 RUN cargo build --release
 
-FROM scratch
-COPY --from=builder /build/target/release/adi-worker /adi-worker
+FROM alpine:latest
+RUN apk add --no-cache ca-certificates
+COPY --from=builder /build/target/release/cocoon /usr/local/bin/cocoon
+
+ENV SIGNALING_SERVER_URL=ws://signaling:8080/ws
+ENV COCOON_ID=""
+
+CMD ["/usr/local/bin/cocoon"]

@@ -1,20 +1,23 @@
+use futures::{SinkExt, StreamExt};
+use lib_tarminal_sync::SignalingMessage;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
+use tokio_tungstenite::{connect_async, tungstenite::Message};
+use uuid::Uuid;
 
-const INPUT_PATH: &str = "/adi/input/request.json";
-const OUTPUT_DIR: &str = "/adi/output";
-const RESPONSE_PATH: &str = "/adi/output/response.json";
+const OUTPUT_DIR: &str = "/cocoon/output";
+const RESPONSE_PATH: &str = "/cocoon/output/response.json";
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum WorkerRequest {
-    Message { message: String },
+enum CommandRequest {
+    Execute { command: String, input: Option<String> },
 }
 
 #[derive(Debug, Serialize)]
-struct WorkerResponse {
+struct CommandResponse {
     success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     data: Option<serde_json::Value>,
@@ -36,11 +39,6 @@ struct OutputFile {
     path: String,
     content: String,
     binary: bool,
-}
-
-fn write_response_sync(response: &WorkerResponse) {
-    let json = serde_json::to_string_pretty(response).unwrap_or_else(|_| "{}".into());
-    let _ = std::fs::write(RESPONSE_PATH, json);
 }
 
 async fn collect_output_files(dir: &str) -> Vec<OutputFile> {
@@ -85,48 +83,14 @@ async fn collect_output_files(dir: &str) -> Vec<OutputFile> {
     files
 }
 
-async fn run() -> WorkerResponse {
-    // Read request from input file
-    let request: WorkerRequest = match tokio::fs::read_to_string(INPUT_PATH).await {
-        Ok(content) => match serde_json::from_str(&content) {
-            Ok(req) => req,
-            Err(e) => {
-                return WorkerResponse {
-                    success: false,
-                    data: None,
-                    error: Some(ErrorInfo {
-                        code: "invalid_request".into(),
-                        details: Some(e.to_string()),
-                    }),
-                    files: vec![],
-                };
-            }
-        },
-        Err(e) => {
-            return WorkerResponse {
-                success: false,
-                data: None,
-                error: Some(ErrorInfo {
-                    code: "input_read_failed".into(),
-                    details: Some(e.to_string()),
-                }),
-                files: vec![],
-            };
-        }
-    };
-
-    let WorkerRequest::Message { message } = request;
-
-    // Get command from env
-    let cmd = std::env::var("ORIGINAL_CMD").unwrap_or_else(|_| "/bin/sh".into());
-
+async fn execute_command(command: &str, input: Option<&str>) -> CommandResponse {
     // Create output directory
     let _ = tokio::fs::create_dir_all(OUTPUT_DIR).await;
 
     // Execute command
     let mut child = match tokio::process::Command::new("/bin/sh")
         .arg("-c")
-        .arg(&cmd)
+        .arg(command)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -134,7 +98,7 @@ async fn run() -> WorkerResponse {
     {
         Ok(child) => child,
         Err(e) => {
-            return WorkerResponse {
+            return CommandResponse {
                 success: false,
                 data: None,
                 error: Some(ErrorInfo {
@@ -146,17 +110,19 @@ async fn run() -> WorkerResponse {
         }
     };
 
-    // Write message to stdin
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(message.as_bytes()).await;
-        let _ = stdin.shutdown().await;
+    // Write input to stdin if provided
+    if let Some(input_str) = input {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(input_str.as_bytes()).await;
+            let _ = stdin.shutdown().await;
+        }
     }
 
     // Wait for process
     let output = match child.wait_with_output().await {
         Ok(output) => output,
         Err(e) => {
-            return WorkerResponse {
+            return CommandResponse {
                 success: false,
                 data: None,
                 error: Some(ErrorInfo {
@@ -176,7 +142,7 @@ async fn run() -> WorkerResponse {
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
     if output.status.success() {
-        WorkerResponse {
+        CommandResponse {
             success: true,
             data: Some(serde_json::json!({
                 "stdout": stdout,
@@ -188,7 +154,7 @@ async fn run() -> WorkerResponse {
         }
     } else {
         let exit_code = output.status.code().unwrap_or(-1);
-        WorkerResponse {
+        CommandResponse {
             success: false,
             data: Some(serde_json::json!({
                 "stdout": stdout,
@@ -206,21 +172,137 @@ async fn run() -> WorkerResponse {
 
 #[tokio::main]
 async fn main() {
-    eprintln!("adi-worker starting");
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive("cocoon=info".parse().unwrap()),
+        )
+        .init();
 
-    let response = run().await;
-    let success = response.success;
+    tracing::info!("🐛 Cocoon starting");
 
-    // Write response to file
-    let json = serde_json::to_string_pretty(&response).unwrap_or_else(|_| "{}".into());
-    if let Err(e) = tokio::fs::write(RESPONSE_PATH, &json).await {
-        eprintln!("Failed to write response: {}", e);
-        // Try sync write as fallback
-        write_response_sync(&response);
+    // Get signaling server URL from environment
+    let signaling_url = std::env::var("SIGNALING_SERVER_URL")
+        .unwrap_or_else(|_| "ws://localhost:8080/ws".to_string());
+
+    // Generate or get device ID
+    let device_id = std::env::var("COCOON_ID").unwrap_or_else(|_| Uuid::new_v4().to_string());
+
+    tracing::info!("🔗 Connecting to signaling server: {}", signaling_url);
+    tracing::info!("🆔 Device ID: {}", device_id);
+
+    // Connect to signaling server
+    let (ws_stream, _) = match connect_async(&signaling_url).await {
+        Ok(conn) => conn,
+        Err(e) => {
+            tracing::error!("❌ Failed to connect to signaling server: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let (mut write, mut read) = ws_stream.split();
+
+    // Register with signaling server
+    let register_msg = SignalingMessage::Register {
+        device_id: device_id.clone(),
+    };
+
+    if let Err(e) = write
+        .send(Message::Text(serde_json::to_string(&register_msg).unwrap()))
+        .await
+    {
+        tracing::error!("❌ Failed to register: {}", e);
+        std::process::exit(1);
     }
 
-    eprintln!("adi-worker completed, success={}", success);
+    tracing::info!("✅ Connected and waiting for commands...");
 
-    // Exit with appropriate code
-    std::process::exit(if success { 0 } else { 1 });
+    // Main message loop
+    while let Some(msg_result) = read.next().await {
+        let msg = match msg_result {
+            Ok(msg) => msg,
+            Err(e) => {
+                tracing::error!("❌ WebSocket error: {}", e);
+                break;
+            }
+        };
+
+        let text = match msg {
+            Message::Text(t) => t,
+            Message::Close(_) => {
+                tracing::info!("🔌 Connection closed");
+                break;
+            }
+            _ => continue,
+        };
+
+        let message: SignalingMessage = match serde_json::from_str(&text) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!("⚠️ Invalid message: {}", e);
+                continue;
+            }
+        };
+
+        match message {
+            SignalingMessage::Registered { .. } => {
+                tracing::info!("✅ Registration confirmed");
+            }
+
+            SignalingMessage::SyncData { payload } => {
+                tracing::info!("📥 Received command request");
+
+                // Parse command request from payload
+                let request: CommandRequest = match serde_json::from_value(payload) {
+                    Ok(req) => req,
+                    Err(e) => {
+                        tracing::warn!("⚠️ Invalid command request: {}", e);
+                        continue;
+                    }
+                };
+
+                match request {
+                    CommandRequest::Execute { command, input } => {
+                        tracing::info!("🚀 Executing: {}", command);
+
+                        let response = execute_command(&command, input.as_deref()).await;
+
+                        // Send response back via signaling server
+                        let response_msg = SignalingMessage::SyncData {
+                            payload: serde_json::to_value(&response).unwrap(),
+                        };
+
+                        if let Err(e) = write
+                            .send(Message::Text(
+                                serde_json::to_string(&response_msg).unwrap(),
+                            ))
+                            .await
+                        {
+                            tracing::error!("❌ Failed to send response: {}", e);
+                        } else {
+                            tracing::info!("📤 Response sent");
+                        }
+                    }
+                }
+            }
+
+            SignalingMessage::PeerConnected { peer_id } => {
+                tracing::info!("👋 Peer connected: {}", peer_id);
+            }
+
+            SignalingMessage::PeerDisconnected { peer_id } => {
+                tracing::info!("👋 Peer disconnected: {}", peer_id);
+            }
+
+            SignalingMessage::Error { message } => {
+                tracing::error!("❌ Server error: {}", message);
+            }
+
+            _ => {
+                tracing::debug!("📨 Other message: {:?}", message);
+            }
+        }
+    }
+
+    tracing::info!("🐛 Cocoon shutting down");
 }
