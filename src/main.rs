@@ -1,9 +1,14 @@
 use futures::{SinkExt, StreamExt};
 use lib_tarminal_sync::SignalingMessage;
+use portable_pty::{CommandBuilder, PtySize, PtySystem};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::io::Read;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::Mutex;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use uuid::Uuid;
 
@@ -13,18 +18,60 @@ const RESPONSE_PATH: &str = "/cocoon/output/response.json";
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum CommandRequest {
-    Execute { command: String, input: Option<String> },
+    /// Execute a simple command (non-interactive)
+    Execute {
+        command: String,
+        input: Option<String>,
+    },
+
+    /// Attach a PTY session (interactive terminal)
+    AttachPty {
+        command: String,
+        cols: u16,
+        rows: u16,
+        #[serde(default)]
+        env: HashMap<String, String>,
+    },
+
+    /// Send input to PTY session
+    PtyInput { session_id: Uuid, data: String },
+
+    /// Resize PTY terminal (remote controls size)
+    PtyResize {
+        session_id: Uuid,
+        cols: u16,
+        rows: u16,
+    },
+
+    /// Close PTY session
+    PtyClose { session_id: Uuid },
 }
 
 #[derive(Debug, Serialize)]
-struct CommandResponse {
-    success: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    data: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<ErrorInfo>,
-    #[serde(default)]
-    files: Vec<OutputFile>,
+#[serde(tag = "type", rename_all = "snake_case")]
+enum CommandResponse {
+    /// Result of Execute command
+    ExecuteResult {
+        success: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        data: Option<serde_json::Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<ErrorInfo>,
+        #[serde(default)]
+        files: Vec<OutputFile>,
+    },
+
+    /// PTY session created successfully
+    PtyCreated { session_id: Uuid },
+
+    /// Output from PTY session (synced in real-time)
+    PtyOutput { session_id: Uuid, data: String },
+
+    /// PTY session exited
+    PtyExited { session_id: Uuid, exit_code: i32 },
+
+    /// Error response
+    Error { code: String, message: String },
 }
 
 #[derive(Debug, Serialize)]
@@ -40,6 +87,18 @@ struct OutputFile {
     content: String,
     binary: bool,
 }
+
+struct PtySession {
+    #[allow(dead_code)]
+    id: Uuid,
+    pair: portable_pty::PtyPair,
+    child: Box<dyn portable_pty::Child + Send>,
+}
+
+type SharedWriter = Arc<Mutex<futures::stream::SplitSink<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    Message,
+>>>;
 
 async fn collect_output_files(dir: &str) -> Vec<OutputFile> {
     let mut files = Vec::new();
@@ -84,10 +143,8 @@ async fn collect_output_files(dir: &str) -> Vec<OutputFile> {
 }
 
 async fn execute_command(command: &str, input: Option<&str>) -> CommandResponse {
-    // Create output directory
     let _ = tokio::fs::create_dir_all(OUTPUT_DIR).await;
 
-    // Execute command
     let mut child = match tokio::process::Command::new("/bin/sh")
         .arg("-c")
         .arg(command)
@@ -98,7 +155,7 @@ async fn execute_command(command: &str, input: Option<&str>) -> CommandResponse 
     {
         Ok(child) => child,
         Err(e) => {
-            return CommandResponse {
+            return CommandResponse::ExecuteResult {
                 success: false,
                 data: None,
                 error: Some(ErrorInfo {
@@ -110,7 +167,6 @@ async fn execute_command(command: &str, input: Option<&str>) -> CommandResponse 
         }
     };
 
-    // Write input to stdin if provided
     if let Some(input_str) = input {
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(input_str.as_bytes()).await;
@@ -118,11 +174,10 @@ async fn execute_command(command: &str, input: Option<&str>) -> CommandResponse 
         }
     }
 
-    // Wait for process
     let output = match child.wait_with_output().await {
         Ok(output) => output,
         Err(e) => {
-            return CommandResponse {
+            return CommandResponse::ExecuteResult {
                 success: false,
                 data: None,
                 error: Some(ErrorInfo {
@@ -134,15 +189,12 @@ async fn execute_command(command: &str, input: Option<&str>) -> CommandResponse 
         }
     };
 
-    // Collect output files
     let files = collect_output_files(OUTPUT_DIR).await;
-
-    // Build response
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
     if output.status.success() {
-        CommandResponse {
+        CommandResponse::ExecuteResult {
             success: true,
             data: Some(serde_json::json!({
                 "stdout": stdout,
@@ -154,7 +206,7 @@ async fn execute_command(command: &str, input: Option<&str>) -> CommandResponse 
         }
     } else {
         let exit_code = output.status.code().unwrap_or(-1);
-        CommandResponse {
+        CommandResponse::ExecuteResult {
             success: false,
             data: Some(serde_json::json!({
                 "stdout": stdout,
@@ -170,6 +222,94 @@ async fn execute_command(command: &str, input: Option<&str>) -> CommandResponse 
     }
 }
 
+async fn create_pty_session(
+    command: &str,
+    cols: u16,
+    rows: u16,
+    env: &HashMap<String, String>,
+    writer: SharedWriter,
+) -> Result<(Uuid, PtySession), String> {
+    let session_id = Uuid::new_v4();
+    let pty_system = portable_pty::native_pty_system();
+
+    let pair = pty_system
+        .openpty(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| format!("Failed to open PTY: {}", e))?;
+
+    let mut cmd = CommandBuilder::new("/bin/sh");
+    cmd.arg("-c");
+    cmd.arg(command);
+
+    // Set environment variables
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
+
+    // Set TERM for proper terminal support
+    cmd.env("TERM", "xterm-256color");
+
+    let child = pair
+        .slave
+        .spawn_command(cmd)
+        .map_err(|e| format!("Failed to spawn command: {}", e))?;
+
+    // Spawn reader task to stream output in real-time
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|e| format!("Failed to clone reader: {}", e))?;
+
+    let session_id_clone = session_id;
+    tokio::task::spawn_blocking(move || {
+        let mut buffer = [0u8; 4096];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break, // EOF
+                Ok(n) => {
+                    let data = String::from_utf8_lossy(&buffer[..n]).to_string();
+                    let response = CommandResponse::PtyOutput {
+                        session_id: session_id_clone,
+                        data,
+                    };
+
+                    let msg = SignalingMessage::SyncData {
+                        payload: serde_json::to_value(&response).unwrap(),
+                    };
+
+                    // Send output to client (non-blocking)
+                    let writer_clone = writer.clone();
+                    tokio::spawn(async move {
+                        let mut w = writer_clone.lock().await;
+                        let _ = w
+                            .send(Message::Text(serde_json::to_string(&msg).unwrap()))
+                            .await;
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!("PTY read error: {}", e);
+                    break;
+                }
+            }
+        }
+
+        tracing::info!("PTY session {} reader task ended", session_id_clone);
+    });
+
+    Ok((
+        session_id,
+        PtySession {
+            id: session_id,
+            pair,
+            child,
+        },
+    ))
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -181,17 +321,14 @@ async fn main() {
 
     tracing::info!("🐛 Cocoon starting");
 
-    // Get signaling server URL from environment
     let signaling_url = std::env::var("SIGNALING_SERVER_URL")
         .unwrap_or_else(|_| "ws://localhost:8080/ws".to_string());
 
-    // Generate or get device ID
     let device_id = std::env::var("COCOON_ID").unwrap_or_else(|_| Uuid::new_v4().to_string());
 
     tracing::info!("🔗 Connecting to signaling server: {}", signaling_url);
     tracing::info!("🆔 Device ID: {}", device_id);
 
-    // Connect to signaling server
     let (ws_stream, _) = match connect_async(&signaling_url).await {
         Ok(conn) => conn,
         Err(e) => {
@@ -200,19 +337,27 @@ async fn main() {
         }
     };
 
-    let (mut write, mut read) = ws_stream.split();
+    let (write, mut read) = ws_stream.split();
+    let writer = Arc::new(Mutex::new(write));
+
+    // PTY sessions storage
+    let pty_sessions: Arc<Mutex<HashMap<Uuid, PtySession>>> =
+        Arc::new(Mutex::new(HashMap::new()));
 
     // Register with signaling server
     let register_msg = SignalingMessage::Register {
         device_id: device_id.clone(),
     };
 
-    if let Err(e) = write
-        .send(Message::Text(serde_json::to_string(&register_msg).unwrap()))
-        .await
     {
-        tracing::error!("❌ Failed to register: {}", e);
-        std::process::exit(1);
+        let mut w = writer.lock().await;
+        if let Err(e) = w
+            .send(Message::Text(serde_json::to_string(&register_msg).unwrap()))
+            .await
+        {
+            tracing::error!("❌ Failed to register: {}", e);
+            std::process::exit(1);
+        }
     }
 
     tracing::info!("✅ Connected and waiting for commands...");
@@ -250,9 +395,6 @@ async fn main() {
             }
 
             SignalingMessage::SyncData { payload } => {
-                tracing::info!("📥 Received command request");
-
-                // Parse command request from payload
                 let request: CommandRequest = match serde_json::from_value(payload) {
                     Ok(req) => req,
                     Err(e) => {
@@ -261,29 +403,113 @@ async fn main() {
                     }
                 };
 
-                match request {
-                    CommandRequest::Execute { command, input } => {
-                        tracing::info!("🚀 Executing: {}", command);
+                let writer_clone = writer.clone();
+                let sessions_clone = pty_sessions.clone();
 
-                        let response = execute_command(&command, input.as_deref()).await;
-
-                        // Send response back via signaling server
-                        let response_msg = SignalingMessage::SyncData {
-                            payload: serde_json::to_value(&response).unwrap(),
-                        };
-
-                        if let Err(e) = write
-                            .send(Message::Text(
-                                serde_json::to_string(&response_msg).unwrap(),
-                            ))
-                            .await
-                        {
-                            tracing::error!("❌ Failed to send response: {}", e);
-                        } else {
-                            tracing::info!("📤 Response sent");
+                tokio::spawn(async move {
+                    let response = match request {
+                        CommandRequest::Execute { command, input } => {
+                            tracing::info!("🚀 Executing: {}", command);
+                            execute_command(&command, input.as_deref()).await
                         }
+
+                        CommandRequest::AttachPty { command, cols, rows, env } => {
+                            tracing::info!("🔗 Attaching PTY: {} ({}x{})", command, cols, rows);
+
+                            match create_pty_session(&command, cols, rows, &env, writer_clone.clone()).await {
+                                Ok((session_id, session)) => {
+                                    sessions_clone.lock().await.insert(session_id, session);
+                                    CommandResponse::PtyCreated { session_id }
+                                }
+                                Err(e) => CommandResponse::Error {
+                                    code: "pty_create_failed".into(),
+                                    message: e,
+                                },
+                            }
+                        }
+
+                        CommandRequest::PtyInput { session_id, data } => {
+                            let sessions = sessions_clone.lock().await;
+                            if let Some(session) = sessions.get(&session_id) {
+                                let mut writer = session.pair.master.take_writer().unwrap();
+                                if let Err(e) = std::io::Write::write_all(&mut writer, data.as_bytes()) {
+                                    CommandResponse::Error {
+                                        code: "pty_write_failed".into(),
+                                        message: e.to_string(),
+                                    }
+                                } else {
+                                    continue; // No response needed for input
+                                }
+                            } else {
+                                CommandResponse::Error {
+                                    code: "session_not_found".into(),
+                                    message: format!("PTY session {} not found", session_id),
+                                }
+                            }
+                        }
+
+                        CommandRequest::PtyResize { session_id, cols, rows } => {
+                            tracing::info!("📐 Resizing PTY {} to {}x{}", session_id, cols, rows);
+                            let sessions = sessions_clone.lock().await;
+                            if let Some(session) = sessions.get(&session_id) {
+                                if let Err(e) = session.pair.master.resize(PtySize {
+                                    rows,
+                                    cols,
+                                    pixel_width: 0,
+                                    pixel_height: 0,
+                                }) {
+                                    CommandResponse::Error {
+                                        code: "resize_failed".into(),
+                                        message: e.to_string(),
+                                    }
+                                } else {
+                                    continue; // No response needed for resize
+                                }
+                            } else {
+                                CommandResponse::Error {
+                                    code: "session_not_found".into(),
+                                    message: format!("PTY session {} not found", session_id),
+                                }
+                            }
+                        }
+
+                        CommandRequest::PtyClose { session_id } => {
+                            tracing::info!("🔌 Closing PTY session {}", session_id);
+                            let mut sessions = sessions_clone.lock().await;
+                            if let Some(mut session) = sessions.remove(&session_id) {
+                                let exit_status = session.child.wait().ok();
+                                let exit_code = exit_status
+                                    .and_then(|s| s.exit_code())
+                                    .unwrap_or(-1) as i32;
+
+                                CommandResponse::PtyExited {
+                                    session_id,
+                                    exit_code,
+                                }
+                            } else {
+                                CommandResponse::Error {
+                                    code: "session_not_found".into(),
+                                    message: format!("PTY session {} not found", session_id),
+                                }
+                            }
+                        }
+                    };
+
+                    // Send response
+                    let response_msg = SignalingMessage::SyncData {
+                        payload: serde_json::to_value(&response).unwrap(),
+                    };
+
+                    let mut w = writer_clone.lock().await;
+                    if let Err(e) = w
+                        .send(Message::Text(
+                            serde_json::to_string(&response_msg).unwrap(),
+                        ))
+                        .await
+                    {
+                        tracing::error!("❌ Failed to send response: {}", e);
                     }
-                }
+                });
             }
 
             SignalingMessage::PeerConnected { peer_id } => {

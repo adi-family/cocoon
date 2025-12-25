@@ -1,25 +1,67 @@
-cocoon, containerized-worker, signaling-server, remote-execution, websocket
+cocoon, containerized-worker, signaling-server, remote-execution, websocket, pty, interactive-terminal
 
 ## Overview
 - Cocoon is a containerized worker environment that connects to a signaling server
-- Enables remote command execution inside Docker containers via WebSocket
-- Replaces the old adi-worker's file-based execution model with real-time bidirectional communication
+- Enables both simple command execution and interactive PTY sessions (vim, htop, claude, etc.)
+- Real-time bidirectional communication via WebSocket
+- Remote controls terminal size, output is synced in real-time
+
+## Capabilities
+
+### 1. Simple Command Execution
+- Execute non-interactive commands (scripts, builds, etc.)
+- Capture stdout, stderr, exit code
+- Collect output files from /cocoon/output
+
+### 2. Interactive PTY Sessions
+- Full pseudo-terminal support for TUI applications
+- Supports vim, htop, tmux, claude, and any terminal-based tool
+- Real-time output streaming with ANSI escape codes
+- Remote-controlled terminal resize (client dictates size)
+- Multiple concurrent PTY sessions
+- TERM=xterm-256color for full color support
 
 ## Architecture
 - Connects to signaling server on startup via WebSocket
-- Registers with a unique device ID (COCOON_ID env var or generated UUID)
+- Registers with unique device ID (COCOON_ID or generated UUID)
 - Waits for command requests via SignalingMessage::SyncData
-- Executes commands and sends responses back through signaling server
-- Collects output files from /cocoon/output directory
+- PTY output streams continuously to client
+- Terminal resize events sent from client to cocoon
 
 ## Environment Variables
 - SIGNALING_SERVER_URL: WebSocket URL of signaling server (default: ws://localhost:8080/ws)
 - COCOON_ID: Unique identifier for this cocoon instance (default: generated UUID)
 
 ## Command Protocol
-- Request format: `{"type": "execute", "command": "...", "input": "..."}`
-- Response includes: success, stdout, stderr, exit_code, output files
-- Files in /cocoon/output are automatically collected and base64-encoded if binary
+
+### Execute (Simple Command)
+```json
+{"type": "execute", "command": "ls -la", "input": "optional stdin"}
+```
+Response: `{"type": "execute_result", "success": true, "data": {...}, "files": [...]}`
+
+### AttachPty (Interactive Terminal)
+```json
+{"type": "attach_pty", "command": "vim test.txt", "cols": 80, "rows": 24, "env": {}}
+```
+Response: `{"type": "pty_created", "session_id": "uuid"}`
+Then continuous: `{"type": "pty_output", "session_id": "uuid", "data": "...ANSI..."}`
+
+### PtyInput (Send Keystrokes)
+```json
+{"type": "pty_input", "session_id": "uuid", "data": "\x1b[A"}
+```
+
+### PtyResize (Remote Controls Size)
+```json
+{"type": "pty_resize", "session_id": "uuid", "cols": 100, "rows": 30}
+```
+
+### PtyClose (Terminate Session)
+```json
+{"type": "pty_close", "session_id": "uuid"}
+```
+Response: `{"type": "pty_exited", "session_id": "uuid", "exit_code": 0}`
 
 ## Usage
 ```bash
