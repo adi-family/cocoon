@@ -3,8 +3,13 @@ FROM rust:1.83-alpine AS builder
 RUN apk add --no-cache musl-dev
 
 WORKDIR /build
-COPY Cargo.toml .
-COPY src ./src
+
+# Copy dependency first
+COPY crates/lib-tarminal-sync /lib-tarminal-sync
+
+# Copy cocoon source
+COPY crates/cocoon/Cargo.toml .
+COPY crates/cocoon/src ./src
 
 RUN cargo build --release
 
