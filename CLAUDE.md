@@ -6,6 +6,155 @@ cocoon, containerized-worker, signaling-server, remote-execution, websocket, pty
 - Real-time bidirectional communication via WebSocket
 - Remote controls terminal size, output is synced in real-time
 
+## Getting Started - Choose Your Setup
+
+### 1. Your Own Machine (Development/Personal Use)
+
+**Best for**: Development, testing, personal projects
+
+#### Option A: Quick Start with ADI Plugin (Recommended)
+```bash
+# One-command install
+curl -fsSL https://adi.the-ihor.com/cocoon/install.sh | sh
+
+# Start natively (fastest, best for development)
+adi cocoon run
+
+# Or start in Docker (isolated, easy cleanup)
+adi cocoon start docker
+```
+
+**Pros**: Easy to install, integrates with ADI ecosystem
+**Cons**: Requires ADI CLI installation
+
+#### Option B: Docker Only (No Installation)
+```bash
+# Quick test (ephemeral session)
+docker run --rm -it \\
+  -e SIGNALING_SERVER_URL=wss://adi.the-ihor.com/api/signaling/ws \\
+  ghcr.io/adi-family/cocoon:latest
+
+# Production (persistent secret)
+docker run -d --restart unless-stopped \\
+  -e SIGNALING_SERVER_URL=wss://adi.the-ihor.com/api/signaling/ws \\
+  -v cocoon-data:/cocoon \\
+  --name cocoon-worker \\
+  ghcr.io/adi-family/cocoon:latest
+```
+
+**Pros**: No installation needed, isolated environment
+**Cons**: Requires Docker, slightly slower than native
+
+### 2. Remote Server/VPS (DigitalOcean, AWS EC2, Hetzner, etc.)
+
+**Best for**: Always-on workers, production deployments, cloud computing
+
+#### Recommended: Docker Deployment
+```bash
+# SSH into your server
+ssh user@your-server.com
+
+# Install Docker (Ubuntu/Debian)
+curl -fsSL https://get.docker.com | sh
+
+# Start cocoon with auto-restart
+docker run -d --restart unless-stopped \\
+  -e SIGNALING_SERVER_URL=wss://adi.the-ihor.com/api/signaling/ws \\
+  -v cocoon-data:/cocoon \\
+  --name cocoon-worker \\
+  ghcr.io/adi-family/cocoon:latest
+
+# Check logs
+docker logs -f cocoon-worker
+```
+
+#### With Setup Token (Auto-Claim)
+```bash
+# Get setup token from web UI
+# Then run with token for automatic ownership claiming:
+docker run -d --restart unless-stopped \\
+  -e SIGNALING_SERVER_URL=wss://adi.the-ihor.com/api/signaling/ws \\
+  -e COCOON_SETUP_TOKEN=<your-token> \\
+  -v cocoon-data:/cocoon \\
+  --name cocoon-worker \\
+  ghcr.io/adi-family/cocoon:latest
+```
+
+**Pros**: Always running, automatic restarts, isolated
+**Cons**: Costs money for server rental
+
+**Cost Reference**:
+- DigitalOcean Droplet: $6-12/month (1-2GB RAM)
+- AWS EC2 t3.micro: ~$7.50/month
+- Hetzner Cloud CX11: €4.15/month (~$4.50)
+
+### 3. Cloud Container Services (Serverless)
+
+**Best for**: Auto-scaling, pay-per-use, minimal management
+
+#### AWS ECS/Fargate
+```bash
+# Use image: ghcr.io/adi-family/cocoon:latest
+# Set environment variables:
+SIGNALING_SERVER_URL=wss://adi.the-ihor.com/api/signaling/ws
+COCOON_SETUP_TOKEN=<your-token>
+
+# Mount EFS volume at /cocoon for persistence
+```
+
+#### Google Cloud Run
+```bash
+gcloud run deploy cocoon-worker \\
+  --image ghcr.io/adi-family/cocoon:latest \\
+  --set-env-vars SIGNALING_SERVER_URL=wss://adi.the-ihor.com/api/signaling/ws \\
+  --set-env-vars COCOON_SETUP_TOKEN=<your-token> \\
+  --min-instances 1
+```
+
+**Pros**: Scales automatically, managed infrastructure
+**Cons**: More complex setup, may be more expensive at scale
+
+### 4. Rented Compute (Vast.ai, RunPod, Lambda Labs)
+
+**Best for**: GPU workloads, temporary high-performance computing
+
+#### Vast.ai Example
+```bash
+# In container startup script:
+docker run -d --restart unless-stopped \\
+  --gpus all \\
+  -e SIGNALING_SERVER_URL=wss://adi.the-ihor.com/api/signaling/ws \\
+  -e COCOON_SETUP_TOKEN=<your-token> \\
+  -v /workspace/cocoon-data:/cocoon \\
+  ghcr.io/adi-family/cocoon:latest
+```
+
+**Pros**: Access to GPUs, pay-per-hour pricing
+**Cons**: Less reliable, may lose data on termination
+
+## Quick Decision Guide
+
+**Choose Native (`adi cocoon run`)** if:
+- ✅ You're developing/testing locally
+- ✅ You want maximum performance
+- ✅ You already have ADI installed
+
+**Choose Docker (`adi cocoon start docker` or `docker run`)** if:
+- ✅ You want isolation from your system
+- ✅ You're running on a remote server
+- ✅ You want easy cleanup
+- ✅ You don't want to install ADI
+
+**Choose Cloud Container Service** if:
+- ✅ You need auto-scaling
+- ✅ You want managed infrastructure
+- ✅ You have existing cloud deployments
+
+**Choose Rented Compute** if:
+- ✅ You need GPU access
+- ✅ You want temporary high-performance computing
+- ✅ Cost is more important than reliability
+
 ## Capabilities
 
 ### 1. Simple Command Execution
