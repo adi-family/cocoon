@@ -1,0 +1,15 @@
+[plugin]
+id = "adi.cocoon"
+name = "Cocoon"
+version = "0.1.0"
+type = "core"
+author = "ADI Team"
+description = "Remote containerized worker with PTY support and signaling server connectivity"
+min_host_version = "0.8.0"
+
+[[provides]]
+id = "adi.cli.commands"
+version = "1.0.0"
+
+[tags]
+categories = ["remote", "execution", "terminal", "pty"]

@@ -4,8 +4,27 @@ version = "0.1.0"
 edition = "2021"
 description = "Cocoon: containerized environment with signaling server connectivity for remote command execution"
 license = "LicenseRef-Proprietary"
+authors = ["ADI Team"]
+
+[[bin]]
+name = "cocoon"
+path = "src/main.rs"
+required-features = ["standalone"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+standalone = []
 
 [dependencies]
+# Plugin ABI
+lib-plugin-abi = { path = "../lib-plugin-abi" }
+abi_stable = "0.11"
+once_cell = "1.19"
+
+# Core dependencies
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "fs", "process", "io-util", "sync"] }
 tokio-tungstenite = "0.24"
 serde = { version = "1", features = ["derive"] }
