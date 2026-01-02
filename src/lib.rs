@@ -46,8 +46,74 @@ extern "C" fn cli_invoke(
             let subcommand = cmd_args.first().map(|s| s.as_str()).unwrap_or("run");
 
             match subcommand {
+                "start" => {
+                    let mode = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("native");
+
+                    match mode {
+                        "docker" => {
+                            // Get environment variables
+                            let signaling_url = std::env::var("SIGNALING_SERVER_URL")
+                                .unwrap_or_else(|_| "ws://localhost:8080/ws".to_string());
+                            let cocoon_secret = std::env::var("COCOON_SECRET").ok();
+                            let setup_token = std::env::var("COCOON_SETUP_TOKEN").ok();
+
+                            // Build docker run command
+                            let mut docker_cmd = std::process::Command::new("docker");
+                            docker_cmd.arg("run")
+                                .arg("--rm")
+                                .arg("-it")
+                                .arg("-e").arg(format!("SIGNALING_SERVER_URL={}", signaling_url))
+                                .arg("-v").arg("cocoon-data:/cocoon");
+
+                            if let Some(secret) = cocoon_secret {
+                                docker_cmd.arg("-e").arg(format!("COCOON_SECRET={}", secret));
+                            }
+
+                            if let Some(token) = setup_token {
+                                docker_cmd.arg("-e").arg(format!("COCOON_SETUP_TOKEN={}", token));
+                            }
+
+                            docker_cmd.arg("ghcr.io/adi-family/cocoon:latest");
+
+                            println!("Starting cocoon in Docker container...");
+                            println!("Command: docker run --rm -it -e SIGNALING_SERVER_URL={} -v cocoon-data:/cocoon ghcr.io/adi-family/cocoon:latest", signaling_url);
+
+                            match docker_cmd.status() {
+                                Ok(status) if status.success() => {
+                                    RResult::ROk(RString::from("Cocoon container exited"))
+                                }
+                                Ok(status) => {
+                                    RResult::RErr(ServiceError::new(1, format!("Docker exited with code: {}", status)))
+                                }
+                                Err(e) => {
+                                    RResult::RErr(ServiceError::new(1, format!("Failed to start Docker: {}. Make sure Docker is installed and running.", e)))
+                                }
+                            }
+                        }
+                        "native" | _ => {
+                            // Start cocoon worker in a background task
+                            std::thread::spawn(|| {
+                                let rt = match tokio::runtime::Runtime::new() {
+                                    Ok(rt) => rt,
+                                    Err(e) => {
+                                        eprintln!("Failed to create runtime: {}", e);
+                                        return;
+                                    }
+                                };
+
+                                rt.block_on(async {
+                                    if let Err(e) = core::run().await {
+                                        eprintln!("Cocoon error: {}", e);
+                                    }
+                                });
+                            });
+
+                            RResult::ROk(RString::from("Cocoon worker started in background"))
+                        }
+                    }
+                }
                 "run" => {
-                    // Start cocoon worker in a background task
+                    // Alias for "start native"
                     std::thread::spawn(|| {
                         let rt = match tokio::runtime::Runtime::new() {
                             Ok(rt) => rt,
@@ -70,10 +136,14 @@ extern "C" fn cli_invoke(
                     let help_text = r#"Cocoon - Remote containerized worker
 
 USAGE:
-    adi cocoon [run]
+    adi cocoon [COMMAND]
 
 COMMANDS:
-    run     Start the cocoon worker (default, connects to signaling server)
+    run                 Start the cocoon worker natively (default)
+    start [MODE]        Start cocoon worker
+        native          Start natively (default)
+        docker          Start in Docker container
+    help                Show this help message
 
 ENVIRONMENT VARIABLES:
     SIGNALING_SERVER_URL    WebSocket URL (default: ws://localhost:8080/ws)
@@ -83,8 +153,10 @@ ENVIRONMENT VARIABLES:
 
 EXAMPLES:
     adi cocoon run
-    SIGNALING_SERVER_URL=wss://example.com/ws adi cocoon run
-    COCOON_SETUP_TOKEN=<token> adi cocoon run
+    adi cocoon start native
+    adi cocoon start docker
+    SIGNALING_SERVER_URL=wss://example.com/ws adi cocoon start docker
+    COCOON_SETUP_TOKEN=<token> adi cocoon start docker
 "#;
                     RResult::ROk(RString::from(help_text))
                 }
@@ -92,7 +164,9 @@ EXAMPLES:
         }
         "list_commands" => {
             let commands = serde_json::json!([
-                {"name": "run", "description": "Start the cocoon worker", "usage": "run"}
+                {"name": "run", "description": "Start the cocoon worker natively", "usage": "run"},
+                {"name": "start", "description": "Start cocoon worker (native or docker)", "usage": "start [native|docker]"},
+                {"name": "help", "description": "Show help message", "usage": "help"}
             ]);
             RResult::ROk(RString::from(
                 serde_json::to_string(&commands).unwrap_or_default(),
