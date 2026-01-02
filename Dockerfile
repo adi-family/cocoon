@@ -4,14 +4,27 @@ RUN apk add --no-cache musl-dev
 
 WORKDIR /build
 
-# Copy dependency first
-COPY crates/lib-tarminal-sync /lib-tarminal-sync
+# Copy dependencies as standalone crates
+COPY crates/lib-tarminal-sync ./lib-tarminal-sync
+COPY crates/lib-plugin-abi ./lib-plugin-abi
 
 # Copy cocoon source
-COPY crates/cocoon/Cargo.toml .
+COPY crates/cocoon/Cargo.toml ./Cargo.toml
 COPY crates/cocoon/src ./src
+COPY crates/cocoon/plugin.toml ./plugin.toml
 
-RUN cargo build --release
+# Fix path dependencies to use local paths
+RUN sed -i 's|path = "../lib-tarminal-sync"|path = "./lib-tarminal-sync"|g' Cargo.toml && \
+    sed -i 's|path = "../lib-plugin-abi"|path = "./lib-plugin-abi"|g' Cargo.toml
+
+# Fix workspace inheritance in dependencies
+RUN cd lib-plugin-abi && \
+    sed -i 's|version.workspace = true|version = "0.1.0"|g' Cargo.toml && \
+    sed -i 's|edition.workspace = true|edition = "2021"|g' Cargo.toml && \
+    sed -i 's|authors.workspace = true|authors = ["ADI Team"]|g' Cargo.toml && \
+    sed -i 's|abi_stable.workspace = true|abi_stable = "0.11"|g' Cargo.toml
+
+RUN cargo build --release --features standalone
 
 FROM alpine:latest
 RUN apk add --no-cache ca-certificates
