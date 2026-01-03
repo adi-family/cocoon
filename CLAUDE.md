@@ -6,6 +6,128 @@ cocoon, containerized-worker, signaling-server, remote-execution, websocket, pty
 - Real-time bidirectional communication via WebSocket
 - Remote controls terminal size, output is synced in real-time
 
+## CLI Commands (ADI Plugin)
+
+The cocoon plugin provides a production-ready CLI for managing cocoon workers.
+
+### Quick Start
+```bash
+# Install ADI CLI (if not already installed)
+curl -fsSL https://adi.the-ihor.com/install.sh | sh
+
+# Start cocoon in foreground (development)
+adi cocoon run
+
+# Start cocoon in Docker daemon mode (production)
+adi cocoon start docker --url wss://adi.the-ihor.com/api/signaling/ws
+
+# Install as system service (Linux/macOS)
+adi cocoon service install
+adi cocoon service start
+```
+
+### Commands
+
+#### `adi cocoon run`
+Start cocoon natively in foreground (development mode).
+
+```bash
+# Basic usage
+adi cocoon run
+
+# With custom signaling server
+SIGNALING_SERVER_URL=wss://example.com/ws adi cocoon run
+```
+
+#### `adi cocoon start docker [OPTIONS]`
+Start cocoon in Docker daemon mode (production-ready).
+
+**Flags:**
+- `--name NAME` - Container name (default: auto-generated)
+- `--url URL` - Signaling server URL (default: ws://localhost:8080/ws)
+- `--token TOKEN` - Setup token for auto-claim
+- `--secret SECRET` - Pre-generated secret for device ID
+
+**Examples:**
+```bash
+# Minimal (auto-named, localhost)
+adi cocoon start docker
+
+# With custom name
+adi cocoon start docker --name my-worker
+
+# Production (one-liner)
+adi cocoon start docker \
+  --name prod-worker \
+  --url wss://adi.the-ihor.com/api/signaling/ws \
+  --token <your-setup-token>
+
+# Multiple workers
+adi cocoon start docker --name worker-1 --url wss://example.com/ws
+adi cocoon start docker --name worker-2 --url wss://example.com/ws
+adi cocoon start docker --name worker-3 --url wss://example.com/ws
+
+# Check status
+docker ps --filter "name=worker-"
+docker logs -f worker-1
+```
+
+**Auto-naming:** If `--name` is not specified, automatically generates names:
+- First: `cocoon-worker`
+- Second: `cocoon-worker-2`
+- Third: `cocoon-worker-3`, etc.
+
+**Priority order:**
+1. `--name` flag (highest)
+2. `COCOON_NAME` env var
+3. Auto-generation (fallback)
+
+#### `adi cocoon service [ACTION]`
+Manage cocoon as a system service (systemd on Linux, launchd on macOS).
+
+**Actions:**
+- `install` - Install systemd/launchd service
+- `uninstall` - Remove service
+- `start` - Start service
+- `stop` - Stop service
+- `restart` - Restart service
+- `status` - Show service status
+- `logs` - Follow service logs
+
+**Examples:**
+```bash
+# Install service (reads SIGNALING_SERVER_URL from env)
+SIGNALING_SERVER_URL=wss://adi.the-ihor.com/api/signaling/ws \
+adi cocoon service install
+
+# Start service
+adi cocoon service start
+
+# Check status
+adi cocoon service status
+
+# View logs (follow mode)
+adi cocoon service logs
+
+# Restart service
+adi cocoon service restart
+
+# Uninstall service
+adi cocoon service stop
+adi cocoon service uninstall
+```
+
+**Service files created:**
+- Linux: `~/.config/systemd/user/cocoon.service`
+- macOS: `~/Library/LaunchAgents/com.adi.cocoon.plist`
+- Secret: `~/.config/cocoon/secret`
+
+**Service features:**
+- Auto-start on login/boot
+- Auto-restart on crash
+- Persistent across terminal sessions
+- Runs in background
+
 ## Getting Started - Choose Your Setup
 
 ### 1. Your Own Machine (Development/Personal Use)
@@ -15,69 +137,114 @@ cocoon, containerized-worker, signaling-server, remote-execution, websocket, pty
 #### Option A: Quick Start with ADI Plugin (Recommended)
 ```bash
 # One-command install
-curl -fsSL https://adi.the-ihor.com/cocoon/install.sh | sh
+curl -fsSL https://adi.the-ihor.com/install.sh | sh
 
-# Start natively (fastest, best for development)
+# Start natively in foreground (development)
 adi cocoon run
 
-# Or start in Docker (isolated, easy cleanup)
-adi cocoon start docker
+# Or start in Docker daemon mode (production)
+adi cocoon start docker \
+  --url wss://adi.the-ihor.com/api/signaling/ws \
+  --token <your-setup-token>
 ```
 
-**Pros**: Easy to install, integrates with ADI ecosystem
+**Pros**: Easy to install, integrates with ADI ecosystem, production-ready
 **Cons**: Requires ADI CLI installation
 
-#### Option B: Docker Only (No Installation)
+#### Option B: System Service (Linux/macOS)
 ```bash
-# Quick test (ephemeral session)
-docker run --rm -it \\
-  -e SIGNALING_SERVER_URL=wss://adi.the-ihor.com/api/signaling/ws \\
-  ghcr.io/adi-family/cocoon:latest
+# Install ADI CLI
+curl -fsSL https://adi.the-ihor.com/install.sh | sh
 
-# Production (persistent secret)
-docker run -d --restart unless-stopped \\
-  -e SIGNALING_SERVER_URL=wss://adi.the-ihor.com/api/signaling/ws \\
-  -v cocoon-data:/cocoon \\
-  --name cocoon-worker \\
-  ghcr.io/adi-family/cocoon:latest
+# Install and start service
+SIGNALING_SERVER_URL=wss://adi.the-ihor.com/api/signaling/ws \
+adi cocoon service install
+
+adi cocoon service start
+
+# Check status
+adi cocoon service status
 ```
 
-**Pros**: No installation needed, isolated environment
-**Cons**: Requires Docker, slightly slower than native
+**Pros**: Auto-start on boot, runs in background, production-ready
+**Cons**: Requires ADI CLI installation
 
-### 2. Remote Server/VPS (DigitalOcean, AWS EC2, Hetzner, etc.)
-
-**Best for**: Always-on workers, production deployments, cloud computing
-
-#### Recommended: Docker Deployment
+#### Option C: Docker Only (No ADI Installation)
 ```bash
-# SSH into your server
-ssh user@your-server.com
-
-# Install Docker (Ubuntu/Debian)
-curl -fsSL https://get.docker.com | sh
-
-# Start cocoon with auto-restart
-docker run -d --restart unless-stopped \\
-  -e SIGNALING_SERVER_URL=wss://adi.the-ihor.com/api/signaling/ws \\
-  -v cocoon-data:/cocoon \\
-  --name cocoon-worker \\
+# Production daemon mode (auto-restart, persistent)
+docker run -d --restart unless-stopped \
+  --name cocoon-worker \
+  -e SIGNALING_SERVER_URL=wss://adi.the-ihor.com/api/signaling/ws \
+  -e COCOON_SETUP_TOKEN=<your-token> \
+  -v cocoon-data:/cocoon \
   ghcr.io/adi-family/cocoon:latest
 
 # Check logs
 docker logs -f cocoon-worker
 ```
 
-#### With Setup Token (Auto-Claim)
+**Pros**: No ADI installation needed, isolated environment
+**Cons**: Manual Docker management required
+
+### 2. Remote Server/VPS (DigitalOcean, AWS EC2, Hetzner, etc.)
+
+**Best for**: Always-on workers, production deployments, cloud computing
+
+#### Option A: ADI CLI with Docker (Recommended)
 ```bash
-# Get setup token from web UI
-# Then run with token for automatic ownership claiming:
-docker run -d --restart unless-stopped \\
-  -e SIGNALING_SERVER_URL=wss://adi.the-ihor.com/api/signaling/ws \\
-  -e COCOON_SETUP_TOKEN=<your-token> \\
-  -v cocoon-data:/cocoon \\
-  --name cocoon-worker \\
+# SSH into your server
+ssh user@your-server.com
+
+# Install ADI CLI
+curl -fsSL https://adi.the-ihor.com/install.sh | sh
+
+# Install Docker
+curl -fsSL https://get.docker.com | sh
+
+# Start cocoon in Docker daemon mode
+adi cocoon start docker \
+  --name prod-worker \
+  --url wss://adi.the-ihor.com/api/signaling/ws \
+  --token <your-setup-token>
+
+# Check logs
+docker logs -f prod-worker
+```
+
+#### Option B: System Service (Linux)
+```bash
+# SSH into your server
+ssh user@your-server.com
+
+# Install ADI CLI
+curl -fsSL https://adi.the-ihor.com/install.sh | sh
+
+# Install and start service
+SIGNALING_SERVER_URL=wss://adi.the-ihor.com/api/signaling/ws \
+COCOON_SETUP_TOKEN=<your-token> \
+adi cocoon service install
+
+adi cocoon service start
+
+# Check status
+adi cocoon service status
+```
+
+#### Option C: Direct Docker (No ADI CLI)
+```bash
+# Install Docker
+curl -fsSL https://get.docker.com | sh
+
+# Start cocoon with auto-restart
+docker run -d --restart unless-stopped \
+  --name cocoon-worker \
+  -e SIGNALING_SERVER_URL=wss://adi.the-ihor.com/api/signaling/ws \
+  -e COCOON_SETUP_TOKEN=<your-token> \
+  -v cocoon-data:/cocoon \
   ghcr.io/adi-family/cocoon:latest
+
+# Check logs
+docker logs -f cocoon-worker
 ```
 
 **Pros**: Always running, automatic restarts, isolated
@@ -134,16 +301,24 @@ docker run -d --restart unless-stopped \\
 
 ## Quick Decision Guide
 
-**Choose Native (`adi cocoon run`)** if:
+**Choose `adi cocoon run` (Native Foreground)** if:
 - ✅ You're developing/testing locally
+- ✅ You want to see logs in real-time
 - ✅ You want maximum performance
-- ✅ You already have ADI installed
+- ✅ You need to stop it easily (Ctrl+C)
 
-**Choose Docker (`adi cocoon start docker` or `docker run`)** if:
+**Choose `adi cocoon start docker` (Docker Daemon)** if:
+- ✅ You want production-ready deployment
 - ✅ You want isolation from your system
 - ✅ You're running on a remote server
-- ✅ You want easy cleanup
-- ✅ You don't want to install ADI
+- ✅ You need auto-restart on failure
+- ✅ You want to run multiple instances easily
+
+**Choose `adi cocoon service` (System Service)** if:
+- ✅ You want auto-start on boot
+- ✅ You prefer native execution (no Docker)
+- ✅ You're on Linux or macOS
+- ✅ You want system integration (systemd/launchd)
 
 **Choose Cloud Container Service** if:
 - ✅ You need auto-scaling
@@ -154,6 +329,29 @@ docker run -d --restart unless-stopped \\
 - ✅ You need GPU access
 - ✅ You want temporary high-performance computing
 - ✅ Cost is more important than reliability
+
+## Multiple Cocoons
+
+Run multiple cocoon workers with unique names:
+
+```bash
+# Using ADI CLI (auto-naming)
+adi cocoon start docker --url wss://adi.the-ihor.com/api/signaling/ws
+adi cocoon start docker --url wss://adi.the-ihor.com/api/signaling/ws
+adi cocoon start docker --url wss://adi.the-ihor.com/api/signaling/ws
+# Creates: cocoon-worker, cocoon-worker-2, cocoon-worker-3
+
+# Using ADI CLI (custom names)
+adi cocoon start docker --name dev-worker --url wss://example.com/ws
+adi cocoon start docker --name staging-worker --url wss://example.com/ws
+adi cocoon start docker --name prod-worker --url wss://example.com/ws
+
+# Manage multiple workers
+docker ps --filter "name=worker-"
+docker logs -f dev-worker
+docker stop staging-worker
+docker restart prod-worker
+```
 
 ## Capabilities
 
@@ -240,9 +438,21 @@ openssl rand -base64 36
 
 ## Environment Variables
 
-### Cocoon
+### Cocoon (CLI Flags Preferred)
+
+When using `adi cocoon` CLI, prefer flags over environment variables:
+- Use `--url` instead of `SIGNALING_SERVER_URL`
+- Use `--token` instead of `COCOON_SETUP_TOKEN`
+- Use `--secret` instead of `COCOON_SECRET`
+- Use `--name` instead of `COCOON_NAME`
+
+**Priority:** CLI flags > Environment variables > Defaults
+
+**Environment variables (fallback):**
 - `SIGNALING_SERVER_URL`: WebSocket URL (default: `ws://localhost:8080/ws`)
 - `COCOON_SECRET`: Optional secret for persistent device ID (otherwise uses `/cocoon/.secret`)
+- `COCOON_SETUP_TOKEN`: Setup token for auto-claim
+- `COCOON_NAME`: Container name for Docker mode
 - `RUST_LOG`: Log level for debugging (e.g., `cocoon=debug`)
 
 ### Signaling Server
