@@ -368,6 +368,90 @@ docker restart prod-worker
 - Multiple concurrent PTY sessions
 - TERM=xterm-256color for full color support
 
+### 3. HTTP Service Proxy (NEW - Phase 2)
+- Proxy HTTP requests to local services running on cocoon
+- Access local APIs, databases, or any HTTP service via signaling server
+- 30-second timeout for proxy requests
+- Full HTTP method support (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS)
+- Headers and body forwarding
+
+**Use cases:**
+- Access FlowMap API running on remote cocoon
+- Query local Postgres/MySQL databases
+- Call local microservices
+- Access development servers (Next.js, Vite, etc.)
+
+**Service Configuration:**
+```bash
+# Via environment variable
+COCOON_SERVICES="flowmap-api:8092,postgres:5432,redis:6379" cocoon
+
+# Via Docker
+docker run -e COCOON_SERVICES="flowmap-api:8092" cocoon
+```
+
+**Example Proxy Request:**
+```json
+{
+  "type": "proxy_http",
+  "request_id": "req-123",
+  "service_name": "flowmap-api",
+  "method": "GET",
+  "path": "/api/parse?path=/project",
+  "headers": {"Accept": "application/json"},
+  "body": null
+}
+```
+
+**Example Proxy Response:**
+```json
+{
+  "type": "proxy_result",
+  "request_id": "req-123",
+  "status_code": 200,
+  "headers": {"content-type": "application/json"},
+  "body": "{\"flows\": [...]}"
+}
+```
+
+### 4. Local Query Aggregation (NEW - Phase 2)
+- Query local data stores for multi-device aggregation
+- Respond to queries from signaling server
+- Support for multiple query types
+
+**Supported Query Types:**
+- `ListTasks` - List all tasks from local task store
+- `GetTaskStats` - Get task statistics (pending, running, completed, failed)
+- `SearchTasks` - Search tasks by query string
+- `SearchKnowledgebase` - Search local knowledgebase
+- `Custom { query_name }` - Custom query handlers
+
+**Example Query Request:**
+```json
+{
+  "type": "query_local",
+  "query_id": "query-456",
+  "query_type": "ListTasks",
+  "params": {"status": "running", "limit": 10}
+}
+```
+
+**Example Query Response:**
+```json
+{
+  "type": "query_result",
+  "query_id": "query-456",
+  "data": {
+    "tasks": [],
+    "total": 0,
+    "source": "cocoon-local"
+  },
+  "is_final": true
+}
+```
+
+**Note:** Query handlers currently return empty results. Integration with lib-task-store will be added in a future update.
+
 ## Architecture
 - Connects to signaling server on startup via WebSocket
 - **Secure persistent sessions**: Client secret → HMAC-SHA256 → Device ID
@@ -453,6 +537,8 @@ When using `adi cocoon` CLI, prefer flags over environment variables:
 - `COCOON_SECRET`: Optional secret for persistent device ID (otherwise uses `/cocoon/.secret`)
 - `COCOON_SETUP_TOKEN`: Setup token for auto-claim
 - `COCOON_NAME`: Container name for Docker mode
+- `COCOON_SERVICES`: Service registry (format: `"service1:port1,service2:port2"`)
+  - Example: `"flowmap-api:8092,postgres:5432,redis:6379"`
 - `RUST_LOG`: Log level for debugging (e.g., `cocoon=debug`)
 
 ### Signaling Server

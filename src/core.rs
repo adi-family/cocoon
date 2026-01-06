@@ -354,23 +354,104 @@ async fn create_pty_session(
 async fn handle_proxy_request(
     request_id: String,
     service_name: String,
-    _method: String,
-    _path: String,
-    _headers: HashMap<String, String>,
-    _body: Option<String>,
+    method: String,
+    path: String,
+    headers: HashMap<String, String>,
+    body: Option<String>,
+    services: &HashMap<String, u16>,
 ) -> CommandResponse {
-    // TODO: Load service registry from config
-    // For now, return a placeholder error
-    tracing::warn!("HTTP proxy not yet configured - service registry needed");
+    // Look up service port in registry
+    let port = match services.get(&service_name) {
+        Some(port) => *port,
+        None => {
+            tracing::warn!("Service not found: {}", service_name);
+            return CommandResponse::ProxyResult {
+                request_id,
+                status_code: 404,
+                headers: HashMap::new(),
+                body: Some(format!("Service not found: {}", service_name)),
+            };
+        }
+    };
 
-    CommandResponse::ProxyResult {
-        request_id,
-        status_code: 503,
-        headers: HashMap::new(),
-        body: Some(format!(
-            "Service proxy not configured: {} (will be implemented with service registry)",
-            service_name
-        )),
+    // Build the target URL
+    let url = format!("http://localhost:{}{}", port, path);
+    tracing::debug!("Proxying {} {} to {}", method, path, url);
+
+    // Create HTTP client
+    let client = reqwest::Client::new();
+
+    // Parse method
+    let http_method = match method.to_uppercase().as_str() {
+        "GET" => reqwest::Method::GET,
+        "POST" => reqwest::Method::POST,
+        "PUT" => reqwest::Method::PUT,
+        "DELETE" => reqwest::Method::DELETE,
+        "PATCH" => reqwest::Method::PATCH,
+        "HEAD" => reqwest::Method::HEAD,
+        "OPTIONS" => reqwest::Method::OPTIONS,
+        _ => {
+            tracing::warn!("Unsupported HTTP method: {}", method);
+            return CommandResponse::ProxyResult {
+                request_id,
+                status_code: 405,
+                headers: HashMap::new(),
+                body: Some(format!("Unsupported method: {}", method)),
+            };
+        }
+    };
+
+    // Build request
+    let mut request_builder = client.request(http_method, &url);
+
+    // Add headers
+    for (key, value) in headers {
+        request_builder = request_builder.header(&key, &value);
+    }
+
+    // Add body if present
+    if let Some(body_str) = body {
+        request_builder = request_builder.body(body_str);
+    }
+
+    // Send request with timeout
+    match request_builder.timeout(std::time::Duration::from_secs(30)).send().await {
+        Ok(response) => {
+            let status_code = response.status().as_u16();
+            let mut response_headers = HashMap::new();
+
+            // Convert headers to HashMap
+            for (key, value) in response.headers() {
+                if let Ok(value_str) = value.to_str() {
+                    response_headers.insert(key.to_string(), value_str.to_string());
+                }
+            }
+
+            // Read response body
+            let response_body = match response.text().await {
+                Ok(text) => Some(text),
+                Err(e) => {
+                    tracing::warn!("Failed to read response body: {}", e);
+                    None
+                }
+            };
+
+            CommandResponse::ProxyResult {
+                request_id,
+                status_code,
+                headers: response_headers,
+                body: response_body,
+            }
+        }
+        Err(e) => {
+            tracing::error!("HTTP proxy request failed: {}", e);
+            CommandResponse::ProxyResult {
+                request_id,
+                status_code: 502,
+                headers: HashMap::new(),
+                body: Some(format!("Proxy error: {}", e)),
+            }
+        }
     }
 }
 
@@ -378,19 +459,79 @@ async fn handle_proxy_request(
 async fn handle_query_local(
     query_id: String,
     query_type: QueryType,
-    _params: JsonValue,
+    params: JsonValue,
 ) -> CommandResponse {
-    // TODO: Implement query handlers based on type
-    // For now, return empty result
-    tracing::info!("Query handler not yet implemented for {:?}", query_type);
+    match query_type {
+        QueryType::ListTasks => {
+            // For now, return empty task list
+            // In production, this would query the local task store
+            // Integration with lib-task-store will come later
+            tracing::debug!("Listing local tasks with params: {:?}", params);
 
-    CommandResponse::QueryResult {
-        query_id,
-        data: serde_json::json!({
-            "items": [],
-            "message": "Query handler not yet implemented"
-        }),
-        is_final: true,
+            CommandResponse::QueryResult {
+                query_id,
+                data: serde_json::json!({
+                    "tasks": [],
+                    "total": 0,
+                    "source": "cocoon-local"
+                }),
+                is_final: true,
+            }
+        }
+        QueryType::GetTaskStats => {
+            tracing::debug!("Getting task stats");
+
+            CommandResponse::QueryResult {
+                query_id,
+                data: serde_json::json!({
+                    "pending": 0,
+                    "running": 0,
+                    "completed": 0,
+                    "failed": 0,
+                    "total": 0
+                }),
+                is_final: true,
+            }
+        }
+        QueryType::SearchTasks => {
+            let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
+            tracing::debug!("Searching tasks for: {}", query);
+
+            CommandResponse::QueryResult {
+                query_id,
+                data: serde_json::json!({
+                    "tasks": [],
+                    "query": query,
+                    "total": 0
+                }),
+                is_final: true,
+            }
+        }
+        QueryType::SearchKnowledgebase => {
+            let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
+            tracing::debug!("Searching knowledgebase for: {}", query);
+
+            CommandResponse::QueryResult {
+                query_id,
+                data: serde_json::json!({
+                    "results": [],
+                    "query": query,
+                    "total": 0
+                }),
+                is_final: true,
+            }
+        }
+        QueryType::Custom { query_name } => {
+            tracing::warn!("Custom query not implemented: {}", query_name);
+
+            CommandResponse::QueryResult {
+                query_id,
+                data: serde_json::json!({
+                    "error": format!("Custom query '{}' not implemented", query_name)
+                }),
+                is_final: true,
+            }
+        }
     }
 }
 
@@ -565,6 +706,27 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let pty_sessions: Arc<Mutex<HashMap<Uuid, PtySession>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
+    // Service registry - parse from COCOON_SERVICES env var
+    // Format: "service1:port1,service2:port2"
+    // Example: "flowmap-api:8092,postgres:5432"
+    let mut services = HashMap::new();
+    if let Ok(services_str) = std::env::var("COCOON_SERVICES") {
+        for service_def in services_str.split(',') {
+            let parts: Vec<&str> = service_def.trim().split(':').collect();
+            if parts.len() == 2 {
+                if let Ok(port) = parts[1].parse::<u16>() {
+                    services.insert(parts[0].to_string(), port);
+                    tracing::info!("📦 Registered service: {} → localhost:{}", parts[0], port);
+                } else {
+                    tracing::warn!("⚠️ Invalid port for service {}: {}", parts[0], parts[1]);
+                }
+            } else {
+                tracing::warn!("⚠️ Invalid service definition: {}", service_def);
+            }
+        }
+    }
+    let services = Arc::new(services);
+
     // Check for setup token (one-command install flow)
     let setup_token = std::env::var("COCOON_SETUP_TOKEN").ok();
     let cocoon_name = std::env::var("COCOON_NAME").ok();
@@ -680,6 +842,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
                 let writer_clone = writer.clone();
                 let sessions_clone = pty_sessions.clone();
+                let services_clone = services.clone();
 
                 tokio::spawn(async move {
                     let response: Option<CommandResponse> = match request {
@@ -779,7 +942,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         } => {
                             tracing::info!("🔀 Proxying HTTP {} {} to service {}", method, path, service_name);
                             Some(
-                                handle_proxy_request(request_id, service_name, method, path, headers, body)
+                                handle_proxy_request(request_id, service_name, method, path, headers, body, &services_clone)
                                     .await,
                             )
                         }
