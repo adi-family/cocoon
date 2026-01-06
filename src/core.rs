@@ -1,8 +1,9 @@
 use futures::{SinkExt, StreamExt};
-use lib_tarminal_sync::SignalingMessage;
+use lib_tarminal_sync::{QueryType, SignalingMessage};
 use portable_pty::{CommandBuilder, PtySize};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
@@ -52,6 +53,23 @@ enum CommandRequest {
 
     /// Close PTY session
     PtyClose { session_id: Uuid },
+
+    /// Proxy HTTP request to local service
+    ProxyHttp {
+        request_id: String,
+        service_name: String,
+        method: String,
+        path: String,
+        headers: HashMap<String, String>,
+        body: Option<String>,
+    },
+
+    /// Query local data (for aggregation)
+    QueryLocal {
+        query_id: String,
+        query_type: QueryType,
+        params: JsonValue,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -76,6 +94,21 @@ enum CommandResponse {
 
     /// PTY session exited
     PtyExited { session_id: Uuid, exit_code: i32 },
+
+    /// HTTP proxy result
+    ProxyResult {
+        request_id: String,
+        status_code: u16,
+        headers: HashMap<String, String>,
+        body: Option<String>,
+    },
+
+    /// Query result (for aggregation)
+    QueryResult {
+        query_id: String,
+        data: JsonValue,
+        is_final: bool,
+    },
 
     /// Error response
     Error { code: String, message: String },
@@ -315,6 +348,50 @@ async fn create_pty_session(
             child,
         },
     ))
+}
+
+/// Handle HTTP proxy request to local service
+async fn handle_proxy_request(
+    request_id: String,
+    service_name: String,
+    _method: String,
+    _path: String,
+    _headers: HashMap<String, String>,
+    _body: Option<String>,
+) -> CommandResponse {
+    // TODO: Load service registry from config
+    // For now, return a placeholder error
+    tracing::warn!("HTTP proxy not yet configured - service registry needed");
+
+    CommandResponse::ProxyResult {
+        request_id,
+        status_code: 503,
+        headers: HashMap::new(),
+        body: Some(format!(
+            "Service proxy not configured: {} (will be implemented with service registry)",
+            service_name
+        )),
+    }
+}
+
+/// Handle local query for aggregation
+async fn handle_query_local(
+    query_id: String,
+    query_type: QueryType,
+    _params: JsonValue,
+) -> CommandResponse {
+    // TODO: Implement query handlers based on type
+    // For now, return empty result
+    tracing::info!("Query handler not yet implemented for {:?}", query_type);
+
+    CommandResponse::QueryResult {
+        query_id,
+        data: serde_json::json!({
+            "items": [],
+            "message": "Query handler not yet implemented"
+        }),
+        is_final: true,
+    }
 }
 
 /// Validate secret strength
@@ -690,6 +767,30 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     message: format!("PTY session {} not found", session_id),
                                 })
                             }
+                        }
+
+                        CommandRequest::ProxyHttp {
+                            request_id,
+                            service_name,
+                            method,
+                            path,
+                            headers,
+                            body,
+                        } => {
+                            tracing::info!("🔀 Proxying HTTP {} {} to service {}", method, path, service_name);
+                            Some(
+                                handle_proxy_request(request_id, service_name, method, path, headers, body)
+                                    .await,
+                            )
+                        }
+
+                        CommandRequest::QueryLocal {
+                            query_id,
+                            query_type,
+                            params,
+                        } => {
+                            tracing::info!("📊 Processing query: {:?}", query_type);
+                            Some(handle_query_local(query_id, query_type, params).await)
                         }
                     };
 
