@@ -1,12 +1,12 @@
 FROM rust:1.83-alpine AS builder
 
-RUN apk add --no-cache musl-dev
+RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig
 
 WORKDIR /build
 
 # Copy dependencies as standalone crates
-COPY crates/lib-tarminal-sync ./lib-tarminal-sync
-COPY crates/lib-plugin-abi ./lib-plugin-abi
+COPY crates/lib/lib-tarminal-sync ./lib-tarminal-sync
+COPY crates/lib/lib-plugin-abi ./lib-plugin-abi
 
 # Copy cocoon source
 COPY crates/cocoon/Cargo.toml ./Cargo.toml
@@ -14,8 +14,8 @@ COPY crates/cocoon/src ./src
 COPY crates/cocoon/plugin.toml ./plugin.toml
 
 # Fix path dependencies to use local paths
-RUN sed -i 's|path = "../lib-tarminal-sync"|path = "./lib-tarminal-sync"|g' Cargo.toml && \
-    sed -i 's|path = "../lib-plugin-abi"|path = "./lib-plugin-abi"|g' Cargo.toml
+RUN sed -i 's|path = "../lib/lib-tarminal-sync"|path = "./lib-tarminal-sync"|g' Cargo.toml && \
+    sed -i 's|path = "../lib/lib-plugin-abi"|path = "./lib-plugin-abi"|g' Cargo.toml
 
 # Fix workspace inheritance in dependencies
 RUN cd lib-plugin-abi && \

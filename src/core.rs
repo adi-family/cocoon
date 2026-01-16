@@ -133,12 +133,19 @@ struct PtySession {
     id: Uuid,
     pair: portable_pty::PtyPair,
     child: Box<dyn portable_pty::Child + Send>,
+    writer: Box<dyn std::io::Write + Send>,
 }
 
-type SharedWriter = Arc<Mutex<futures::stream::SplitSink<
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
-    Message,
->>>;
+type SharedWriter = Arc<
+    Mutex<
+        futures::stream::SplitSink<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            Message,
+        >,
+    >,
+>;
 
 async fn collect_output_files(dir: &str) -> Vec<OutputFile> {
     let mut files = Vec::new();
@@ -340,12 +347,19 @@ async fn create_pty_session(
         tracing::info!("PTY session {} reader task ended", session_id_clone);
     });
 
+    // Take the writer once and store it
+    let pty_writer = pair
+        .master
+        .take_writer()
+        .map_err(|e| format!("Failed to take PTY writer: {}", e))?;
+
     Ok((
         session_id,
         PtySession {
             id: session_id,
             pair,
             child,
+            writer: pty_writer,
         },
     ))
 }
@@ -415,7 +429,11 @@ async fn handle_proxy_request(
     }
 
     // Send request with timeout
-    match request_builder.timeout(std::time::Duration::from_secs(30)).send().await {
+    match request_builder
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+    {
         Ok(response) => {
             let status_code = response.status().as_u16();
             let mut response_headers = HashMap::new();
@@ -605,7 +623,10 @@ async fn save_device_id(device_id: &str) {
         tracing::warn!("⚠️ Could not save device ID to {}: {}", DEVICE_ID_PATH, e);
         tracing::warn!("💡 Mount volume at /cocoon for persistent device ID");
     } else {
-        tracing::info!("💾 Saved device ID to {} for reconnection verification", DEVICE_ID_PATH);
+        tracing::info!(
+            "💾 Saved device ID to {} for reconnection verification",
+            DEVICE_ID_PATH
+        );
     }
 }
 
@@ -658,13 +679,22 @@ async fn get_or_create_secret() -> (String, Option<String>) {
 
     // Generate new cryptographically strong secret
     let secret = generate_strong_secret();
-    tracing::info!("🆕 Generated new cryptographically strong secret ({} chars, {} bits entropy)",
-        GENERATED_SECRET_LENGTH, GENERATED_SECRET_LENGTH * 6);
+    tracing::info!(
+        "🆕 Generated new cryptographically strong secret ({} chars, {} bits entropy)",
+        GENERATED_SECRET_LENGTH,
+        GENERATED_SECRET_LENGTH * 6
+    );
 
     // Try to save it (may fail in read-only containers, that's ok)
     if let Err(e) = tokio::fs::write(SECRET_PATH, &secret).await {
-        tracing::warn!("⚠️ Could not save secret to {} (ephemeral session): {}", SECRET_PATH, e);
-        tracing::warn!("💡 Set COCOON_SECRET env var or mount volume at /cocoon for persistent sessions");
+        tracing::warn!(
+            "⚠️ Could not save secret to {} (ephemeral session): {}",
+            SECRET_PATH,
+            e
+        );
+        tracing::warn!(
+            "💡 Set COCOON_SECRET env var or mount volume at /cocoon for persistent sessions"
+        );
     } else {
         tracing::info!("💾 Saved secret to {} for persistent sessions", SECRET_PATH);
     }
@@ -703,8 +733,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let writer = Arc::new(Mutex::new(write));
 
     // PTY sessions storage
-    let pty_sessions: Arc<Mutex<HashMap<Uuid, PtySession>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let pty_sessions: Arc<Mutex<HashMap<Uuid, PtySession>>> = Arc::new(Mutex::new(HashMap::new()));
 
     // Service registry - parse from COCOON_SERVICES env var
     // Format: "service1:port1,service2:port2"
@@ -796,15 +825,23 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         match message {
-            SignalingMessage::Registered { device_id: assigned_id } => {
+            SignalingMessage::Registered {
+                device_id: assigned_id,
+            } => {
                 tracing::info!("✅ Registration confirmed");
                 tracing::info!("🆔 Device ID: {}", assigned_id);
                 tracing::info!("");
                 tracing::info!("📋 To claim ownership:");
-                tracing::info!("   Anyone with this secret can become an owner (co-ownership supported)");
+                tracing::info!(
+                    "   Anyone with this secret can become an owner (co-ownership supported)"
+                );
                 tracing::info!("");
                 tracing::info!("   WebSocket message:");
-                tracing::info!(r#"   {{ "type": "claim_cocoon", "device_id": "{}", "secret": "{}", "access_token": "YOUR_TOKEN" }}"#, assigned_id, secret_for_claiming);
+                tracing::info!(
+                    r#"   {{ "type": "claim_cocoon", "device_id": "{}", "secret": "{}", "access_token": "YOUR_TOKEN" }}"#,
+                    assigned_id,
+                    secret_for_claiming
+                );
                 tracing::info!("");
                 tracing::info!("   ⚠️  Share this secret only with trusted co-owners!");
                 tracing::info!("");
@@ -813,7 +850,11 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 save_device_id(&assigned_id).await;
             }
 
-            SignalingMessage::RegisteredWithOwner { device_id: assigned_id, owner_id, name } => {
+            SignalingMessage::RegisteredWithOwner {
+                device_id: assigned_id,
+                owner_id,
+                name,
+            } => {
                 tracing::info!("✅ Registration confirmed with auto-claim");
                 tracing::info!("🆔 Device ID: {}", assigned_id);
                 tracing::info!("👤 Owner: {}", owner_id);
@@ -851,10 +892,23 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                             Some(execute_command(&command, input.as_deref()).await)
                         }
 
-                        CommandRequest::AttachPty { command, cols, rows, env } => {
+                        CommandRequest::AttachPty {
+                            command,
+                            cols,
+                            rows,
+                            env,
+                        } => {
                             tracing::info!("🔗 Attaching PTY: {} ({}x{})", command, cols, rows);
 
-                            match create_pty_session(&command, cols, rows, &env, writer_clone.clone()).await {
+                            match create_pty_session(
+                                &command,
+                                cols,
+                                rows,
+                                &env,
+                                writer_clone.clone(),
+                            )
+                            .await
+                            {
                                 Ok((session_id, session)) => {
                                     sessions_clone.lock().await.insert(session_id, session);
                                     Some(CommandResponse::PtyCreated { session_id })
@@ -867,15 +921,17 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         }
 
                         CommandRequest::PtyInput { session_id, data } => {
-                            let sessions = sessions_clone.lock().await;
-                            if let Some(session) = sessions.get(&session_id) {
-                                let mut writer = session.pair.master.take_writer().unwrap();
-                                if let Err(e) = std::io::Write::write_all(&mut writer, data.as_bytes()) {
+                            let mut sessions = sessions_clone.lock().await;
+                            if let Some(session) = sessions.get_mut(&session_id) {
+                                if let Err(e) =
+                                    std::io::Write::write_all(&mut session.writer, data.as_bytes())
+                                {
                                     Some(CommandResponse::Error {
                                         code: "pty_write_failed".into(),
                                         message: e.to_string(),
                                     })
                                 } else {
+                                    let _ = std::io::Write::flush(&mut session.writer);
                                     None // No response needed for successful input
                                 }
                             } else {
@@ -886,7 +942,11 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
 
-                        CommandRequest::PtyResize { session_id, cols, rows } => {
+                        CommandRequest::PtyResize {
+                            session_id,
+                            cols,
+                            rows,
+                        } => {
                             tracing::info!("📐 Resizing PTY {} to {}x{}", session_id, cols, rows);
                             let sessions = sessions_clone.lock().await;
                             if let Some(session) = sessions.get(&session_id) {
@@ -916,9 +976,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                             let mut sessions = sessions_clone.lock().await;
                             if let Some(mut session) = sessions.remove(&session_id) {
                                 let exit_status = session.child.wait().ok();
-                                let exit_code = exit_status
-                                    .map(|s| s.exit_code() as i32)
-                                    .unwrap_or(-1);
+                                let exit_code =
+                                    exit_status.map(|s| s.exit_code() as i32).unwrap_or(-1);
 
                                 Some(CommandResponse::PtyExited {
                                     session_id,
@@ -940,10 +999,23 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                             headers,
                             body,
                         } => {
-                            tracing::info!("🔀 Proxying HTTP {} {} to service {}", method, path, service_name);
+                            tracing::info!(
+                                "🔀 Proxying HTTP {} {} to service {}",
+                                method,
+                                path,
+                                service_name
+                            );
                             Some(
-                                handle_proxy_request(request_id, service_name, method, path, headers, body, &services_clone)
-                                    .await,
+                                handle_proxy_request(
+                                    request_id,
+                                    service_name,
+                                    method,
+                                    path,
+                                    headers,
+                                    body,
+                                    &services_clone,
+                                )
+                                .await,
                             )
                         }
 
@@ -965,9 +1037,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
                         let mut w = writer_clone.lock().await;
                         if let Err(e) = w
-                            .send(Message::Text(
-                                serde_json::to_string(&response_msg).unwrap(),
-                            ))
+                            .send(Message::Text(serde_json::to_string(&response_msg).unwrap()))
                             .await
                         {
                             tracing::error!("❌ Failed to send response: {}", e);
