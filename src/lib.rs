@@ -5,9 +5,11 @@
 mod core;
 mod interactive;
 mod runtime;
+pub mod silk;
 
 pub use core::run;
 pub use runtime::{CocoonInfo, CocoonStatus, Runtime, RuntimeManager, RuntimeType};
+pub use silk::{AnsiToHtml, SilkSession};
 
 use abi_stable::std_types::{ROption, RResult, RStr, RString, RVec};
 use base64::Engine;

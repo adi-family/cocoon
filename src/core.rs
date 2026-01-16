@@ -1,5 +1,6 @@
+use crate::silk::{AnsiToHtml, SilkSession};
 use futures::{SinkExt, StreamExt};
-use lib_tarminal_sync::{QueryType, SignalingMessage};
+use lib_tarminal_sync::{QueryType, SignalingMessage, SilkResponse, SilkStream};
 use portable_pty::{CommandBuilder, PtySize};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -70,6 +71,42 @@ enum CommandRequest {
         query_type: QueryType,
         params: JsonValue,
     },
+
+    // ========== Silk Terminal Commands ==========
+    /// Create a new Silk session
+    SilkCreateSession {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+        #[serde(default)]
+        env: HashMap<String, String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        shell: Option<String>,
+    },
+
+    /// Execute command in Silk session
+    SilkExecute {
+        session_id: Uuid,
+        command: String,
+        command_id: Uuid,
+    },
+
+    /// Send input to running Silk command (for interactive mode)
+    SilkInput {
+        session_id: Uuid,
+        command_id: Uuid,
+        data: String,
+    },
+
+    /// Resize Silk interactive terminal
+    SilkResize {
+        session_id: Uuid,
+        command_id: Uuid,
+        cols: u16,
+        rows: u16,
+    },
+
+    /// Close Silk session
+    SilkCloseSession { session_id: Uuid },
 }
 
 #[derive(Debug, Serialize)]
@@ -112,6 +149,10 @@ enum CommandResponse {
 
     /// Error response
     Error { code: String, message: String },
+
+    /// Silk terminal response (wraps SilkResponse)
+    #[serde(untagged)]
+    SilkResponse(SilkResponse),
 }
 
 #[derive(Debug, Serialize)]
@@ -735,6 +776,10 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // PTY sessions storage
     let pty_sessions: Arc<Mutex<HashMap<Uuid, PtySession>>> = Arc::new(Mutex::new(HashMap::new()));
 
+    // Silk sessions storage
+    let silk_sessions: Arc<Mutex<HashMap<Uuid, SilkSession>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
     // Service registry - parse from COCOON_SERVICES env var
     // Format: "service1:port1,service2:port2"
     // Example: "flowmap-api:8092,postgres:5432"
@@ -884,6 +929,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let writer_clone = writer.clone();
                 let sessions_clone = pty_sessions.clone();
                 let services_clone = services.clone();
+                let silk_sessions_clone = silk_sessions.clone();
 
                 tokio::spawn(async move {
                     let response: Option<CommandResponse> = match request {
@@ -1026,6 +1072,402 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         } => {
                             tracing::info!("📊 Processing query: {:?}", query_type);
                             Some(handle_query_local(query_id, query_type, params).await)
+                        }
+
+                        // ========== Silk Terminal Commands ==========
+                        CommandRequest::SilkCreateSession { cwd, env, shell } => {
+                            tracing::info!("🧵 Creating Silk session");
+                            match SilkSession::new(cwd, env, shell) {
+                                Ok(session) => {
+                                    let response = SilkResponse::SessionCreated {
+                                        session_id: session.id,
+                                        cwd: session.cwd.clone(),
+                                        shell: session.shell.clone(),
+                                    };
+                                    silk_sessions_clone.lock().await.insert(session.id, session);
+                                    Some(CommandResponse::SilkResponse(response))
+                                }
+                                Err(e) => {
+                                    Some(CommandResponse::SilkResponse(SilkResponse::Error {
+                                        session_id: None,
+                                        command_id: None,
+                                        code: "session_create_failed".to_string(),
+                                        message: e,
+                                    }))
+                                }
+                            }
+                        }
+
+                        CommandRequest::SilkExecute {
+                            session_id,
+                            command,
+                            command_id,
+                        } => {
+                            tracing::info!("🧵 Silk execute: {} (session {})", command, session_id);
+                            let mut silk_sessions = silk_sessions_clone.lock().await;
+
+                            if let Some(session) = silk_sessions.get_mut(&session_id) {
+                                match session.execute(&command, command_id) {
+                                    Ok((interactive, child_opt)) => {
+                                        if interactive {
+                                            // Need PTY for interactive command
+                                            // Create PTY session with the command
+                                            drop(silk_sessions); // Release lock before async call
+
+                                            let mut env = HashMap::new();
+                                            env.insert(
+                                                "TERM".to_string(),
+                                                "xterm-256color".to_string(),
+                                            );
+
+                                            match create_pty_session(
+                                                &command,
+                                                80,
+                                                24,
+                                                &env,
+                                                writer_clone.clone(),
+                                            )
+                                            .await
+                                            {
+                                                Ok((pty_session_id, pty_session)) => {
+                                                    sessions_clone
+                                                        .lock()
+                                                        .await
+                                                        .insert(pty_session_id, pty_session);
+
+                                                    // Update silk session with PTY info
+                                                    if let Some(s) = silk_sessions_clone
+                                                        .lock()
+                                                        .await
+                                                        .get_mut(&session_id)
+                                                    {
+                                                        s.set_pty_session(
+                                                            command_id,
+                                                            pty_session_id,
+                                                        );
+                                                    }
+
+                                                    Some(CommandResponse::SilkResponse(
+                                                        SilkResponse::InteractiveRequired {
+                                                            session_id,
+                                                            command_id,
+                                                            reason: format!(
+                                                                "Command '{}' requires interactive mode",
+                                                                command
+                                                                    .split_whitespace()
+                                                                    .next()
+                                                                    .unwrap_or(&command)
+                                                            ),
+                                                            pty_session_id,
+                                                        },
+                                                    ))
+                                                }
+                                                Err(e) => Some(CommandResponse::SilkResponse(
+                                                    SilkResponse::Error {
+                                                        session_id: Some(session_id),
+                                                        command_id: Some(command_id),
+                                                        code: "pty_create_failed".to_string(),
+                                                        message: e,
+                                                    },
+                                                )),
+                                            }
+                                        } else if let Some(mut child) = child_opt {
+                                            // Non-interactive command - stream output
+                                            let writer_for_output = writer_clone.clone();
+                                            let sessions_for_cwd = silk_sessions_clone.clone();
+                                            let cmd_for_cwd = command.clone();
+
+                                            // Send started message
+                                            let started = SilkResponse::CommandStarted {
+                                                session_id,
+                                                command_id,
+                                                interactive: false,
+                                            };
+                                            let started_msg = SignalingMessage::SyncData {
+                                                payload: serde_json::to_value(
+                                                    &CommandResponse::SilkResponse(started),
+                                                )
+                                                .unwrap(),
+                                            };
+                                            let mut w = writer_clone.lock().await;
+                                            let _ = w
+                                                .send(Message::Text(
+                                                    serde_json::to_string(&started_msg).unwrap(),
+                                                ))
+                                                .await;
+                                            drop(w);
+
+                                            // Spawn task to read output
+                                            tokio::spawn(async move {
+                                                let mut stdout_reader = std::io::BufReader::new(
+                                                    child.stdout.take().unwrap(),
+                                                );
+                                                let mut stderr_reader = std::io::BufReader::new(
+                                                    child.stderr.take().unwrap(),
+                                                );
+
+                                                // Read stdout in chunks
+                                                let mut buf = [0u8; 4096];
+                                                loop {
+                                                    match stdout_reader.get_mut().read(&mut buf) {
+                                                        Ok(0) => break,
+                                                        Ok(n) => {
+                                                            let data =
+                                                                String::from_utf8_lossy(&buf[..n])
+                                                                    .to_string();
+                                                            let html = AnsiToHtml::convert(&data);
+                                                            let output = SilkResponse::Output {
+                                                                session_id,
+                                                                command_id,
+                                                                stream: SilkStream::Stdout,
+                                                                data: data.clone(),
+                                                                html: Some(html),
+                                                            };
+                                                            let msg = SignalingMessage::SyncData {
+                                                                payload: serde_json::to_value(
+                                                                    &CommandResponse::SilkResponse(
+                                                                        output,
+                                                                    ),
+                                                                )
+                                                                .unwrap(),
+                                                            };
+                                                            let mut w =
+                                                                writer_for_output.lock().await;
+                                                            let _ = w
+                                                                .send(Message::Text(
+                                                                    serde_json::to_string(&msg)
+                                                                        .unwrap(),
+                                                                ))
+                                                                .await;
+                                                        }
+                                                        Err(_) => break,
+                                                    }
+                                                }
+
+                                                // Read any remaining stderr
+                                                let mut stderr_buf = Vec::new();
+                                                let _ = stderr_reader.read_to_end(&mut stderr_buf);
+                                                if !stderr_buf.is_empty() {
+                                                    let data = String::from_utf8_lossy(&stderr_buf)
+                                                        .to_string();
+                                                    let html = AnsiToHtml::convert(&data);
+                                                    let output = SilkResponse::Output {
+                                                        session_id,
+                                                        command_id,
+                                                        stream: SilkStream::Stderr,
+                                                        data: data.clone(),
+                                                        html: Some(html),
+                                                    };
+                                                    let msg = SignalingMessage::SyncData {
+                                                        payload: serde_json::to_value(
+                                                            &CommandResponse::SilkResponse(output),
+                                                        )
+                                                        .unwrap(),
+                                                    };
+                                                    let mut w = writer_for_output.lock().await;
+                                                    let _ = w
+                                                        .send(Message::Text(
+                                                            serde_json::to_string(&msg).unwrap(),
+                                                        ))
+                                                        .await;
+                                                }
+
+                                                // Wait for exit
+                                                let exit_code = child
+                                                    .wait()
+                                                    .map(|s| s.code().unwrap_or(-1))
+                                                    .unwrap_or(-1);
+
+                                                // Update cwd if cd command
+                                                {
+                                                    let mut sessions =
+                                                        sessions_for_cwd.lock().await;
+                                                    if let Some(s) = sessions.get_mut(&session_id) {
+                                                        s.update_cwd_if_cd(&cmd_for_cwd);
+                                                        s.complete_command(command_id);
+
+                                                        let completed =
+                                                            SilkResponse::CommandCompleted {
+                                                                session_id,
+                                                                command_id,
+                                                                exit_code,
+                                                                cwd: s.cwd.clone(),
+                                                            };
+                                                        let msg = SignalingMessage::SyncData {
+                                                            payload: serde_json::to_value(
+                                                                &CommandResponse::SilkResponse(
+                                                                    completed,
+                                                                ),
+                                                            )
+                                                            .unwrap(),
+                                                        };
+                                                        let mut w = writer_for_output.lock().await;
+                                                        let _ = w
+                                                            .send(Message::Text(
+                                                                serde_json::to_string(&msg)
+                                                                    .unwrap(),
+                                                            ))
+                                                            .await;
+                                                    }
+                                                }
+                                            });
+
+                                            None // Response sent asynchronously
+                                        } else {
+                                            Some(CommandResponse::SilkResponse(
+                                                SilkResponse::Error {
+                                                    session_id: Some(session_id),
+                                                    command_id: Some(command_id),
+                                                    code: "execute_failed".to_string(),
+                                                    message: "No child process created".to_string(),
+                                                },
+                                            ))
+                                        }
+                                    }
+                                    Err(e) => {
+                                        Some(CommandResponse::SilkResponse(SilkResponse::Error {
+                                            session_id: Some(session_id),
+                                            command_id: Some(command_id),
+                                            code: "execute_failed".to_string(),
+                                            message: e,
+                                        }))
+                                    }
+                                }
+                            } else {
+                                Some(CommandResponse::SilkResponse(SilkResponse::Error {
+                                    session_id: Some(session_id),
+                                    command_id: Some(command_id),
+                                    code: "session_not_found".to_string(),
+                                    message: format!("Silk session {} not found", session_id),
+                                }))
+                            }
+                        }
+
+                        CommandRequest::SilkInput {
+                            session_id,
+                            command_id,
+                            data,
+                        } => {
+                            // For interactive commands, forward to PTY
+                            let silk_sessions = silk_sessions_clone.lock().await;
+                            if let Some(session) = silk_sessions.get(&session_id) {
+                                if let Some(cmd) = session.running_commands.get(&command_id) {
+                                    if let Some(pty_session_id) = cmd.pty_session_id {
+                                        drop(silk_sessions);
+                                        let mut pty_sessions = sessions_clone.lock().await;
+                                        if let Some(pty) = pty_sessions.get_mut(&pty_session_id) {
+                                            if let Err(e) = std::io::Write::write_all(
+                                                &mut pty.writer,
+                                                data.as_bytes(),
+                                            ) {
+                                                Some(CommandResponse::SilkResponse(
+                                                    SilkResponse::Error {
+                                                        session_id: Some(session_id),
+                                                        command_id: Some(command_id),
+                                                        code: "input_failed".to_string(),
+                                                        message: e.to_string(),
+                                                    },
+                                                ))
+                                            } else {
+                                                let _ = std::io::Write::flush(&mut pty.writer);
+                                                None
+                                            }
+                                        } else {
+                                            Some(CommandResponse::SilkResponse(
+                                                SilkResponse::Error {
+                                                    session_id: Some(session_id),
+                                                    command_id: Some(command_id),
+                                                    code: "pty_not_found".to_string(),
+                                                    message: "PTY session not found".to_string(),
+                                                },
+                                            ))
+                                        }
+                                    } else {
+                                        Some(CommandResponse::SilkResponse(SilkResponse::Error {
+                                            session_id: Some(session_id),
+                                            command_id: Some(command_id),
+                                            code: "not_interactive".to_string(),
+                                            message: "Command is not in interactive mode"
+                                                .to_string(),
+                                        }))
+                                    }
+                                } else {
+                                    Some(CommandResponse::SilkResponse(SilkResponse::Error {
+                                        session_id: Some(session_id),
+                                        command_id: Some(command_id),
+                                        code: "command_not_found".to_string(),
+                                        message: "Command not found in session".to_string(),
+                                    }))
+                                }
+                            } else {
+                                Some(CommandResponse::SilkResponse(SilkResponse::Error {
+                                    session_id: Some(session_id),
+                                    command_id: Some(command_id),
+                                    code: "session_not_found".to_string(),
+                                    message: format!("Silk session {} not found", session_id),
+                                }))
+                            }
+                        }
+
+                        CommandRequest::SilkResize {
+                            session_id,
+                            command_id,
+                            cols,
+                            rows,
+                        } => {
+                            let silk_sessions = silk_sessions_clone.lock().await;
+                            if let Some(session) = silk_sessions.get(&session_id) {
+                                if let Some(cmd) = session.running_commands.get(&command_id) {
+                                    if let Some(pty_session_id) = cmd.pty_session_id {
+                                        drop(silk_sessions);
+                                        let pty_sessions = sessions_clone.lock().await;
+                                        if let Some(pty) = pty_sessions.get(&pty_session_id) {
+                                            if let Err(e) = pty.pair.master.resize(PtySize {
+                                                rows,
+                                                cols,
+                                                pixel_width: 0,
+                                                pixel_height: 0,
+                                            }) {
+                                                Some(CommandResponse::SilkResponse(
+                                                    SilkResponse::Error {
+                                                        session_id: Some(session_id),
+                                                        command_id: Some(command_id),
+                                                        code: "resize_failed".to_string(),
+                                                        message: e.to_string(),
+                                                    },
+                                                ))
+                                            } else {
+                                                None
+                                            }
+                                        } else {
+                                            None // PTY may have closed already
+                                        }
+                                    } else {
+                                        None // Not interactive, no resize needed
+                                    }
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        }
+
+                        CommandRequest::SilkCloseSession { session_id } => {
+                            tracing::info!("🧵 Closing Silk session {}", session_id);
+                            let mut silk_sessions = silk_sessions_clone.lock().await;
+                            if silk_sessions.remove(&session_id).is_some() {
+                                Some(CommandResponse::SilkResponse(SilkResponse::SessionClosed {
+                                    session_id,
+                                }))
+                            } else {
+                                Some(CommandResponse::SilkResponse(SilkResponse::Error {
+                                    session_id: Some(session_id),
+                                    command_id: None,
+                                    code: "session_not_found".to_string(),
+                                    message: format!("Silk session {} not found", session_id),
+                                }))
+                            }
                         }
                     };
 
