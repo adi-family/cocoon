@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 const REPO_OWNER: &str = "adi-family";
 const REPO_NAME: &str = "cocoon";
-const DOCKER_IMAGE: &str = "ghcr.io/adi-family/cocoon";
+const DOCKER_IMAGE: &str = "docker-registry.the-ihor.com/cocoon";
 
 /// Result of checking for updates
 #[derive(Debug, Clone)]

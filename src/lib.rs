@@ -850,7 +850,7 @@ fn create_docker_cocoon(
             .arg(format!("COCOON_SETUP_TOKEN={}", token));
     }
 
-    docker_cmd.arg("ghcr.io/adi-family/cocoon:latest");
+    docker_cmd.arg("docker-registry.the-ihor.com/cocoon:latest");
 
     println!("Creating Docker cocoon '{}'...", name);
 

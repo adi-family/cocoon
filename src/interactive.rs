@@ -417,7 +417,7 @@ fn create_docker_cocoon_interactive() -> Result<(), String> {
             .arg(format!("COCOON_SETUP_TOKEN={}", setup_token));
     }
 
-    docker_cmd.arg("ghcr.io/adi-family/cocoon:latest");
+    docker_cmd.arg("docker-registry.the-ihor.com/cocoon:latest");
 
     println!("\nCreating Docker cocoon '{}'...", name);
 
