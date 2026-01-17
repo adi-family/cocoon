@@ -1,7 +1,7 @@
 [plugin]
 id = "adi.cocoon"
 name = "Cocoon"
-version = "0.2.0"
+version = "0.2.1"
 type = "core"
 author = "ADI Team"
 description = "Remote containerized worker with PTY support and signaling server connectivity"
