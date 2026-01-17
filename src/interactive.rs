@@ -12,6 +12,8 @@ pub enum InteractiveAction {
     Stop,
     Restart,
     Logs,
+    Update,
+    CheckUpdate,
     Remove,
     Create,
     Help,
@@ -27,6 +29,8 @@ impl std::fmt::Display for InteractiveAction {
             InteractiveAction::Stop => write!(f, "stop     - Stop a cocoon"),
             InteractiveAction::Restart => write!(f, "restart  - Restart a cocoon"),
             InteractiveAction::Logs => write!(f, "logs     - View cocoon logs"),
+            InteractiveAction::Update => write!(f, "update   - Update cocoon to latest version"),
+            InteractiveAction::CheckUpdate => write!(f, "check    - Check for available updates"),
             InteractiveAction::Remove => write!(f, "remove   - Remove a cocoon"),
             InteractiveAction::Create => write!(f, "create   - Create a new cocoon"),
             InteractiveAction::Help => write!(f, "help     - Show help"),
@@ -48,6 +52,8 @@ pub fn run_interactive(manager: &RuntimeManager) -> Result<(), String> {
             InteractiveAction::Stop,
             InteractiveAction::Restart,
             InteractiveAction::Logs,
+            InteractiveAction::Update,
+            InteractiveAction::CheckUpdate,
             InteractiveAction::Remove,
             InteractiveAction::Create,
             InteractiveAction::Help,
@@ -86,6 +92,16 @@ pub fn run_interactive(manager: &RuntimeManager) -> Result<(), String> {
             }
             Ok(InteractiveAction::Logs) => {
                 if let Err(e) = handle_logs_interactive(manager) {
+                    println!("Error: {}\n", e);
+                }
+            }
+            Ok(InteractiveAction::Update) => {
+                if let Err(e) = handle_update_interactive(manager) {
+                    println!("Error: {}\n", e);
+                }
+            }
+            Ok(InteractiveAction::CheckUpdate) => {
+                if let Err(e) = handle_check_update_interactive(manager) {
                     println!("Error: {}\n", e);
                 }
             }
@@ -257,6 +273,42 @@ fn handle_logs_interactive(manager: &RuntimeManager) -> Result<(), String> {
 
     runtime.logs(&cocoon.name, follow, Some(50))?;
     println!();
+
+    Ok(())
+}
+
+/// Handle update command interactively
+fn handle_update_interactive(manager: &RuntimeManager) -> Result<(), String> {
+    let cocoon = select_cocoon(manager, "Select cocoon to update:")?;
+    let runtime = manager.get_runtime(cocoon.runtime);
+
+    let confirm = Confirm::new(&format!(
+        "Update cocoon '{}'? This will restart the cocoon.",
+        cocoon.name
+    ))
+    .with_default(true)
+    .prompt()
+    .unwrap_or(false);
+
+    if !confirm {
+        println!("Cancelled\n");
+        return Ok(());
+    }
+
+    println!("\nUpdating '{}'...\n", cocoon.name);
+    let result = runtime.update(&cocoon.name)?;
+    println!("{}\n", result);
+
+    Ok(())
+}
+
+/// Handle check-update command interactively
+fn handle_check_update_interactive(manager: &RuntimeManager) -> Result<(), String> {
+    let cocoon = select_cocoon(manager, "Select cocoon to check for updates:")?;
+    let runtime = manager.get_runtime(cocoon.runtime);
+
+    let result = runtime.check_update(&cocoon.name)?;
+    println!("{}", result);
 
     Ok(())
 }
@@ -438,6 +490,8 @@ Commands:
   stop     - Stop a running cocoon
   restart  - Restart a cocoon
   logs     - View logs for a cocoon
+  update   - Update cocoon to latest version
+  check    - Check for available updates
   remove   - Remove a cocoon (stops if running)
   create   - Create a new cocoon (Docker or Machine)
   help     - Show this help
@@ -445,7 +499,9 @@ Commands:
 
 Runtimes:
   docker   - Docker containers (cocoon-* prefix)
+             Update: Pulls latest image and recreates container
   machine  - Native systemd/launchd service
+             Update: Downloads latest binary and restarts service
 
 Tips:
   - Use arrow keys to navigate menus
@@ -457,6 +513,8 @@ Non-interactive usage:
   adi cocoon start <name>
   adi cocoon stop <name>
   adi cocoon logs <name> [-f]
+  adi cocoon update <name>
+  adi cocoon check-update <name>
 
 "#
     );

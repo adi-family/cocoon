@@ -752,7 +752,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    tracing::info!("🐛 Cocoon starting");
+    tracing::info!("🐛 Cocoon starting (v{})", env!("CARGO_PKG_VERSION"));
 
     // Get or create client secret and load device ID (for reconnection verification)
     let (secret, device_id) = get_or_create_secret().await;
@@ -809,17 +809,20 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // If setup token provided: use RegisterWithSetupToken (auto-claims ownership)
     // Otherwise: use Register (manual claiming required)
     let secret_for_claiming = secret.clone(); // Keep for displaying claiming instructions
+    let cocoon_version = env!("CARGO_PKG_VERSION").to_string();
     let register_msg = if let Some(ref token) = setup_token {
         tracing::info!("🎫 Using setup token for auto-registration");
         SignalingMessage::RegisterWithSetupToken {
             secret,
             setup_token: token.clone(),
             name: cocoon_name.clone(),
+            version: cocoon_version,
         }
     } else {
         SignalingMessage::Register {
             secret,
             device_id: device_id.clone(),
+            version: cocoon_version,
         }
     };
 

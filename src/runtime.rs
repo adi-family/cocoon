@@ -2,6 +2,7 @@
 //!
 //! Supports Docker containers and Machine (native systemd/launchd) services.
 
+use crate::self_update;
 use std::fmt;
 
 /// Runtime type for a cocoon instance
@@ -108,6 +109,12 @@ pub trait Runtime {
 
     /// Get runtime type
     fn runtime_type(&self) -> RuntimeType;
+
+    /// Update a cocoon to the latest version
+    fn update(&self, name: &str) -> Result<String, String>;
+
+    /// Check for available updates
+    fn check_update(&self, name: &str) -> Result<String, String>;
 }
 
 // === Docker Runtime ===
@@ -317,6 +324,54 @@ impl Runtime for DockerRuntime {
 
     fn runtime_type(&self) -> RuntimeType {
         RuntimeType::Docker
+    }
+
+    fn update(&self, name: &str) -> Result<String, String> {
+        println!("Updating Docker cocoon '{}'...\n", name);
+
+        // Check if container exists
+        let _ = self.status(name)?;
+
+        // Pull latest image
+        let updated = self_update::docker::pull_latest_image("latest")?;
+
+        if !updated {
+            return Ok("Already running the latest image.".to_string());
+        }
+
+        // Recreate container with new image
+        let result = self_update::docker::recreate_container(name, "latest")?;
+
+        Ok(format!(
+            "Update complete!\n  {}\n\nThe cocoon is now running the latest image.",
+            result
+        ))
+    }
+
+    fn check_update(&self, name: &str) -> Result<String, String> {
+        println!("Checking for updates for Docker cocoon '{}'...\n", name);
+
+        // Check if container exists
+        let info = self.status(name)?;
+
+        let (needs_update, details) = self_update::docker::check_for_updates("latest")?;
+
+        let mut output = String::new();
+        output.push_str(&format!("Cocoon: {}\n", name));
+        output.push_str(&format!("Runtime: Docker\n"));
+        output.push_str(&format!("Status: {}\n", info.status));
+        if let Some(ref image) = info.image {
+            output.push_str(&format!("Image: {}\n", image));
+        }
+        output.push_str(&format!("\n{}\n", details));
+
+        if needs_update {
+            output.push_str("\nRun 'adi cocoon update {}' to update.\n");
+        } else {
+            output.push_str("\nTip: Run 'adi cocoon update' to pull the latest image.\n");
+        }
+
+        Ok(output)
     }
 }
 
@@ -607,6 +662,36 @@ impl Runtime for MachineRuntime {
 
     fn runtime_type(&self) -> RuntimeType {
         RuntimeType::Machine
+    }
+
+    fn update(&self, _name: &str) -> Result<String, String> {
+        println!("Updating Machine cocoon...\n");
+
+        // Check if service is installed
+        if !Self::is_service_installed() {
+            return Err(
+                "Machine service not installed. Install with: adi cocoon create --runtime machine"
+                    .to_string(),
+            );
+        }
+
+        // Update binary and restart service
+        self_update::machine::update_and_restart()
+    }
+
+    fn check_update(&self, _name: &str) -> Result<String, String> {
+        println!("Checking for updates for Machine cocoon...\n");
+
+        // Check if service is installed
+        if !Self::is_service_installed() {
+            return Err(
+                "Machine service not installed. Install with: adi cocoon create --runtime machine"
+                    .to_string(),
+            );
+        }
+
+        let check_result = self_update::check_for_updates()?;
+        Ok(self_update::format_check_result(&check_result))
     }
 }
 

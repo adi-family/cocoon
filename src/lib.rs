@@ -5,6 +5,7 @@
 mod core;
 mod interactive;
 mod runtime;
+mod self_update;
 pub mod silk;
 
 pub use core::run;
@@ -600,6 +601,137 @@ extern "C" fn cli_invoke(
                     RResult::ROk(RString::from("Cocoon worker started in background"))
                 }
 
+                // Check for updates
+                "check-update" | "check" => {
+                    let name = cmd_args.get(1).map(|s| s.as_str());
+
+                    if let Some(name) = name {
+                        // Check specific cocoon
+                        match manager.find_cocoon(name) {
+                            Some((_, runtime_type)) => {
+                                let runtime = manager.get_runtime(runtime_type);
+                                match runtime.check_update(name) {
+                                    Ok(msg) => {
+                                        println!("{}", msg);
+                                        RResult::ROk(RString::from(msg))
+                                    }
+                                    Err(e) => RResult::RErr(ServiceError::new(1, e)),
+                                }
+                            }
+                            None => RResult::RErr(ServiceError::new(
+                                1,
+                                format!("Cocoon '{}' not found. Use 'adi cocoon list' to see available cocoons.", name),
+                            )),
+                        }
+                    } else {
+                        // Check all cocoons
+                        match manager.list_all() {
+                            Ok(cocoons) if cocoons.is_empty() => {
+                                println!("No cocoons found. Create one with: adi cocoon create");
+                                RResult::ROk(RString::from("No cocoons found"))
+                            }
+                            Ok(cocoons) => {
+                                let mut results = Vec::new();
+                                for info in cocoons {
+                                    let runtime = manager.get_runtime(info.runtime);
+                                    println!("--- {} ({}) ---", info.name, info.runtime);
+                                    match runtime.check_update(&info.name) {
+                                        Ok(msg) => {
+                                            println!("{}", msg);
+                                            results.push(format!("{}: OK", info.name));
+                                        }
+                                        Err(e) => {
+                                            println!("Error: {}\n", e);
+                                            results.push(format!("{}: Error", info.name));
+                                        }
+                                    }
+                                }
+                                RResult::ROk(RString::from(results.join(", ")))
+                            }
+                            Err(e) => RResult::RErr(ServiceError::new(1, e)),
+                        }
+                    }
+                }
+
+                // Perform update on a cocoon
+                "update" | "upgrade" | "self-update" => {
+                    let name = cmd_args.get(1).map(|s| s.as_str());
+
+                    if let Some(name) = name {
+                        // Update specific cocoon
+                        match manager.find_cocoon(name) {
+                            Some((_, runtime_type)) => {
+                                let runtime = manager.get_runtime(runtime_type);
+                                match runtime.update(name) {
+                                    Ok(msg) => {
+                                        println!("{}", msg);
+                                        RResult::ROk(RString::from(msg))
+                                    }
+                                    Err(e) => RResult::RErr(ServiceError::new(1, e)),
+                                }
+                            }
+                            None => RResult::RErr(ServiceError::new(
+                                1,
+                                format!("Cocoon '{}' not found. Use 'adi cocoon list' to see available cocoons.", name),
+                            )),
+                        }
+                    } else {
+                        // Interactive selection or update all
+                        let all_flag = cmd_args.iter().any(|a| a == "--all" || a == "-a");
+
+                        if all_flag {
+                            // Update all cocoons
+                            match manager.list_all() {
+                                Ok(cocoons) if cocoons.is_empty() => {
+                                    println!(
+                                        "No cocoons found. Create one with: adi cocoon create"
+                                    );
+                                    RResult::ROk(RString::from("No cocoons found"))
+                                }
+                                Ok(cocoons) => {
+                                    let mut results = Vec::new();
+                                    for info in cocoons {
+                                        let runtime = manager.get_runtime(info.runtime);
+                                        println!(
+                                            "\n=== Updating {} ({}) ===\n",
+                                            info.name, info.runtime
+                                        );
+                                        match runtime.update(&info.name) {
+                                            Ok(msg) => {
+                                                println!("{}", msg);
+                                                results.push(format!("{}: Updated", info.name));
+                                            }
+                                            Err(e) => {
+                                                println!("Error: {}", e);
+                                                results.push(format!("{}: Failed", info.name));
+                                            }
+                                        }
+                                    }
+                                    println!("\n=== Update Summary ===");
+                                    for r in &results {
+                                        println!("  {}", r);
+                                    }
+                                    RResult::ROk(RString::from(results.join(", ")))
+                                }
+                                Err(e) => RResult::RErr(ServiceError::new(1, e)),
+                            }
+                        } else {
+                            // Interactive mode
+                            if let Err(e) = interactive::run_interactive(&manager) {
+                                return RResult::RErr(ServiceError::new(1, e));
+                            }
+                            RResult::ROk(RString::from("Done"))
+                        }
+                    }
+                }
+
+                // Show version
+                "version" | "-v" | "-V" | "--version" => {
+                    let version = env!("CARGO_PKG_VERSION");
+                    println!("cocoon {}", version);
+                    RResult::ROk(RString::from(format!("cocoon {}", version)))
+                }
+
                 // Help
                 "help" | "-h" | "--help" => {
                     let help_text = get_help_text();
@@ -629,6 +761,9 @@ extern "C" fn cli_invoke(
                 {"name": "rm", "description": "Remove a cocoon", "usage": "rm <name> [--force]"},
                 {"name": "create", "description": "Create a new cocoon", "usage": "create [--runtime docker|machine] [--name NAME] [--url URL]"},
                 {"name": "run", "description": "Run cocoon natively in foreground", "usage": "run"},
+                {"name": "check-update", "description": "Check for available updates", "usage": "check-update [name]"},
+                {"name": "update", "description": "Update cocoon to latest version", "usage": "update [name] [--all]"},
+                {"name": "version", "description": "Show current version", "usage": "version"},
                 {"name": "help", "description": "Show help", "usage": "help"}
             ]);
             RResult::ROk(RString::from(
@@ -757,6 +892,9 @@ COMMANDS:
     rm <name> [--force] Remove a cocoon
     create              Create a new cocoon (interactive)
     run                 Run cocoon natively in foreground
+    check-update [name] Check for available updates
+    update [name]       Update cocoon to latest version
+    version             Show current version
     help                Show this help message
 
 CREATE OPTIONS:
@@ -767,9 +905,14 @@ CREATE OPTIONS:
     --secret SECRET     Pre-generated secret
     --start             Start service after create (machine only)
 
+UPDATE OPTIONS:
+    --all, -a           Update all cocoons
+
 RUNTIMES:
     docker      Docker containers (prefix: cocoon-*)
+                Update: Pulls latest image and recreates container
     machine     Native systemd/launchd service
+                Update: Downloads latest binary and restarts service
 
 EXAMPLES:
     # Interactive mode (recommended)
@@ -788,6 +931,18 @@ EXAMPLES:
 
     # Create a Machine (native service) cocoon
     adi cocoon create --runtime machine --url wss://example.com/ws --start
+
+    # Check for updates (specific cocoon)
+    adi cocoon check-update cocoon-worker
+
+    # Check for updates (all cocoons)
+    adi cocoon check-update
+
+    # Update a specific cocoon
+    adi cocoon update cocoon-worker
+
+    # Update all cocoons
+    adi cocoon update --all
 
 ENVIRONMENT VARIABLES:
     SIGNALING_SERVER_URL    WebSocket URL (default: ws://localhost:8080/ws)
