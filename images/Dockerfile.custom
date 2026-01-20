@@ -1,0 +1,162 @@
+# Cocoon - Custom (User-configurable)
+# Size: Varies | Use: Build your own cocoon image
+#
+# Build with custom packages:
+#   docker buildx bake custom \
+#     --set custom.args.CUSTOM_BASE=debian:bookworm \
+#     --set custom.args.CUSTOM_PACKAGES="vim htop neovim postgresql-client" \
+#     --set custom.args.CUSTOM_SETUP_SCRIPT="curl -fsSL https://example.com/setup.sh | sh"
+#
+# Or build directly:
+#   docker build -f images/Dockerfile.custom \
+#     --build-arg CUSTOM_BASE=ubuntu:24.04 \
+#     --build-arg CUSTOM_PACKAGES="nodejs npm rust-all" \
+#     -t my-cocoon .
+
+# =============================================================================
+# Stage 1: Build cocoon binary
+# =============================================================================
+FROM rust:1.85-alpine AS builder
+
+RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig
+
+WORKDIR /build
+
+COPY crates/lib/lib-tarminal-sync ./lib-tarminal-sync
+COPY crates/lib/lib-plugin-abi ./lib-plugin-abi
+COPY crates/cocoon/Cargo.toml ./Cargo.toml
+COPY crates/cocoon/src ./src
+COPY crates/cocoon/plugin.toml ./plugin.toml
+
+RUN sed -i 's|path = "../lib/lib-tarminal-sync"|path = "./lib-tarminal-sync"|g' Cargo.toml && \
+    sed -i 's|path = "../lib/lib-plugin-abi"|path = "./lib-plugin-abi"|g' Cargo.toml
+
+RUN cd lib-plugin-abi && \
+    sed -i 's|version.workspace = true|version = "0.1.0"|g' Cargo.toml && \
+    sed -i 's|edition.workspace = true|edition = "2021"|g' Cargo.toml && \
+    sed -i 's|authors.workspace = true|authors = ["ADI Team"]|g' Cargo.toml && \
+    sed -i 's|abi_stable.workspace = true|abi_stable = "0.11"|g' Cargo.toml
+
+RUN cargo build --release --features standalone
+
+# =============================================================================
+# Stage 2: Runtime (Custom base)
+# =============================================================================
+ARG CUSTOM_BASE=ubuntu:24.04
+FROM ${CUSTOM_BASE}
+
+LABEL org.opencontainers.image.title="Cocoon Custom"
+LABEL org.opencontainers.image.description="Custom user-configured containerized worker environment"
+LABEL cocoon.variant="custom"
+
+# Build arguments for customization
+ARG CUSTOM_PACKAGES=""
+ARG CUSTOM_SETUP_SCRIPT=""
+ARG CUSTOM_USER=cocoon
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Detect package manager and install base tools + custom packages
+RUN set -eux; \
+    # Detect OS and package manager
+    if command -v apt-get >/dev/null 2>&1; then \
+        # Debian/Ubuntu
+        apt-get update && \
+        apt-get install -y --no-install-recommends \
+            ca-certificates \
+            curl \
+            wget \
+            git \
+            jq \
+            bash \
+            ${CUSTOM_PACKAGES} && \
+        apt-get clean && \
+        rm -rf /var/lib/apt/lists/*; \
+    elif command -v apk >/dev/null 2>&1; then \
+        # Alpine
+        apk add --no-cache \
+            ca-certificates \
+            curl \
+            wget \
+            git \
+            jq \
+            bash \
+            ${CUSTOM_PACKAGES}; \
+    elif command -v dnf >/dev/null 2>&1; then \
+        # Fedora/RHEL
+        dnf install -y \
+            ca-certificates \
+            curl \
+            wget \
+            git \
+            jq \
+            bash \
+            ${CUSTOM_PACKAGES} && \
+        dnf clean all; \
+    elif command -v yum >/dev/null 2>&1; then \
+        # CentOS/older RHEL
+        yum install -y \
+            ca-certificates \
+            curl \
+            wget \
+            git \
+            jq \
+            bash \
+            ${CUSTOM_PACKAGES} && \
+        yum clean all; \
+    elif command -v pacman >/dev/null 2>&1; then \
+        # Arch Linux
+        pacman -Syu --noconfirm \
+            ca-certificates \
+            curl \
+            wget \
+            git \
+            jq \
+            bash \
+            ${CUSTOM_PACKAGES}; \
+    elif command -v zypper >/dev/null 2>&1; then \
+        # openSUSE
+        zypper install -y \
+            ca-certificates \
+            curl \
+            wget \
+            git \
+            jq \
+            bash \
+            ${CUSTOM_PACKAGES} && \
+        zypper clean; \
+    else \
+        echo "Warning: Unknown package manager, skipping package installation"; \
+    fi
+
+# Run custom setup script if provided
+RUN if [ -n "${CUSTOM_SETUP_SCRIPT}" ]; then \
+        echo "Running custom setup script..."; \
+        sh -c "${CUSTOM_SETUP_SCRIPT}"; \
+    fi
+
+# Copy cocoon binary
+COPY --from=builder /build/target/release/cocoon /usr/local/bin/cocoon
+
+# Setup workspace
+RUN mkdir -p /cocoon/workspace /cocoon/output
+WORKDIR /cocoon/workspace
+
+# Create non-root user (if useradd is available)
+RUN if command -v useradd >/dev/null 2>&1; then \
+        useradd -m -s /bin/bash ${CUSTOM_USER} && \
+        chown -R ${CUSTOM_USER}:${CUSTOM_USER} /cocoon; \
+    elif command -v adduser >/dev/null 2>&1; then \
+        adduser -D -s /bin/bash ${CUSTOM_USER} && \
+        chown -R ${CUSTOM_USER}:${CUSTOM_USER} /cocoon; \
+    fi
+
+# Environment
+ENV SIGNALING_SERVER_URL=ws://signaling:8080/ws
+ENV COCOON_VARIANT=custom
+ENV TERM=xterm-256color
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD pgrep cocoon || exit 1
+
+CMD ["/usr/local/bin/cocoon"]

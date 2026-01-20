@@ -177,7 +177,7 @@ docker run -d --restart unless-stopped \
   -e SIGNALING_SERVER_URL=wss://adi.the-ihor.com/api/signaling/ws \
   -e COCOON_SETUP_TOKEN=<your-token> \
   -v cocoon-data:/cocoon \
-  ghcr.io/adi-family/cocoon:latest
+  git.the-ihor.com/adi/cocoon:latest
 
 # Check logs
 docker logs -f cocoon-worker
@@ -241,7 +241,7 @@ docker run -d --restart unless-stopped \
   -e SIGNALING_SERVER_URL=wss://adi.the-ihor.com/api/signaling/ws \
   -e COCOON_SETUP_TOKEN=<your-token> \
   -v cocoon-data:/cocoon \
-  ghcr.io/adi-family/cocoon:latest
+  git.the-ihor.com/adi/cocoon:latest
 
 # Check logs
 docker logs -f cocoon-worker
@@ -261,7 +261,7 @@ docker logs -f cocoon-worker
 
 #### AWS ECS/Fargate
 ```bash
-# Use image: ghcr.io/adi-family/cocoon:latest
+# Use image: git.the-ihor.com/adi/cocoon:latest
 # Set environment variables:
 SIGNALING_SERVER_URL=wss://adi.the-ihor.com/api/signaling/ws
 COCOON_SETUP_TOKEN=<your-token>
@@ -272,7 +272,7 @@ COCOON_SETUP_TOKEN=<your-token>
 #### Google Cloud Run
 ```bash
 gcloud run deploy cocoon-worker \\
-  --image ghcr.io/adi-family/cocoon:latest \\
+  --image git.the-ihor.com/adi/cocoon:latest \\
   --set-env-vars SIGNALING_SERVER_URL=wss://adi.the-ihor.com/api/signaling/ws \\
   --set-env-vars COCOON_SETUP_TOKEN=<your-token> \\
   --min-instances 1
@@ -293,7 +293,7 @@ docker run -d --restart unless-stopped \\
   -e SIGNALING_SERVER_URL=wss://adi.the-ihor.com/api/signaling/ws \\
   -e COCOON_SETUP_TOKEN=<your-token> \\
   -v /workspace/cocoon-data:/cocoon \\
-  ghcr.io/adi-family/cocoon:latest
+  git.the-ihor.com/adi/cocoon:latest
 ```
 
 **Pros**: Access to GPUs, pay-per-hour pricing
@@ -721,6 +721,150 @@ cargo run
   }
 }
 ```
+
+## Docker Image Variants
+
+Cocoon provides multiple Docker image variants for different use cases. Build with Docker Bake:
+
+```bash
+# Build all variants
+docker buildx bake
+
+# Build specific variant
+docker buildx bake alpine
+docker buildx bake ubuntu
+
+# Build minimal set
+docker buildx bake minimal
+
+# Build dev set
+docker buildx bake dev
+```
+
+### Available Variants
+
+| Image | Base | Size | Use Case | Key Tools |
+|-------|------|------|----------|-----------|
+| `cocoon:alpine` | Alpine 3.20 | ~15MB | Production, minimal | bash, curl, git, jq |
+| `cocoon:debian` | Debian Bookworm | ~100MB | Balanced dev | build-essential, python3, vim, ssh |
+| `cocoon:ubuntu` | Ubuntu 24.04 | ~150MB | Full dev (default) | nodejs, clang, cmake, sudo, zsh |
+| `cocoon:python` | Python 3.12 | ~180MB | Python/ML | pip, poetry, uv, pytest, jupyter |
+| `cocoon:node` | Node.js 22 | ~200MB | JS/TS dev | npm, yarn, pnpm, bun, typescript |
+| `cocoon:full` | Ubuntu 24.04 | ~500MB | Everything | rust, go, docker-cli, kubectl, terraform |
+| `cocoon:gpu` | CUDA 12.4 | ~2GB | GPU/ML workloads | cuda, cudnn, pytorch-ready |
+| `cocoon:custom` | Configurable | Varies | Your own setup | User-defined |
+
+### Tag Aliases
+
+- `cocoon:latest` → `cocoon:ubuntu`
+- `cocoon:minimal` → `cocoon:alpine`
+- `cocoon:slim` → `cocoon:debian`
+- `cocoon:py` → `cocoon:python`
+- `cocoon:js` → `cocoon:node`
+- `cocoon:all` → `cocoon:full`
+- `cocoon:cuda` → `cocoon:gpu`
+
+### Custom Image
+
+Build your own cocoon with custom base and packages:
+
+```bash
+# Via Docker Bake
+docker buildx bake custom \
+  --set custom.args.CUSTOM_BASE=debian:bookworm \
+  --set custom.args.CUSTOM_PACKAGES="vim htop neovim postgresql-client" \
+  --set custom.args.CUSTOM_SETUP_SCRIPT="curl -fsSL https://example.com/setup.sh | sh"
+
+# Or direct build
+docker build -f images/Dockerfile.custom \
+  --build-arg CUSTOM_BASE=fedora:40 \
+  --build-arg CUSTOM_PACKAGES="nodejs npm rust cargo" \
+  -t my-cocoon .
+```
+
+**Supported base images:**
+- Debian/Ubuntu (apt-get)
+- Alpine (apk)
+- Fedora/RHEL (dnf)
+- CentOS (yum)
+- Arch Linux (pacman)
+- openSUSE (zypper)
+
+### GPU Image
+
+For CUDA workloads with NVIDIA GPUs:
+
+```bash
+# Build
+docker buildx bake gpu
+
+# Run with GPU access
+docker run --gpus all \
+  -e SIGNALING_SERVER_URL=wss://adi.the-ihor.com/api/signaling/ws \
+  -v cocoon-data:/cocoon \
+  git.the-ihor.com/adi/cocoon:gpu
+
+# Run on Vast.ai / RunPod
+docker run --gpus all \
+  -e SIGNALING_SERVER_URL=wss://adi.the-ihor.com/api/signaling/ws \
+  -e COCOON_SETUP_TOKEN=<token> \
+  -v /workspace/models:/cocoon/models \
+  git.the-ihor.com/adi/cocoon:gpu
+```
+
+**Requirements:**
+- NVIDIA GPU with CUDA support
+- NVIDIA Container Toolkit on host
+- Linux host (no macOS/Windows Docker Desktop GPU support)
+
+### Multi-Platform Support
+
+All images (except GPU) support both architectures:
+- `linux/amd64` (x86_64)
+- `linux/arm64` (Apple Silicon, AWS Graviton)
+
+### Image Selection Guide
+
+**Choose `alpine`** if:
+- Deploying to production with minimal attack surface
+- Running on resource-constrained environments
+- Only need basic shell commands
+
+**Choose `debian`** if:
+- Need build tools without full dev environment
+- Want Python without extra ML libraries
+- Balanced size vs. functionality
+
+**Choose `ubuntu`** (default) if:
+- General development work
+- Need Node.js + Python together
+- Want `sudo` access and common dev tools
+
+**Choose `python`** if:
+- Python-centric development
+- Machine learning (CPU)
+- Data science workflows
+
+**Choose `node`** if:
+- JavaScript/TypeScript development
+- Frontend tooling
+- Need multiple package managers (npm, yarn, pnpm, bun)
+
+**Choose `full`** if:
+- Multi-language polyglot development
+- Need cloud tools (kubectl, terraform, gh)
+- CI/CD workloads
+- Don't care about image size
+
+**Choose `gpu`** if:
+- GPU-accelerated ML inference
+- CUDA development
+- Running on cloud GPU instances (Vast.ai, RunPod, Lambda Labs)
+
+**Choose `custom`** if:
+- Need specific packages not in other variants
+- Using a different Linux distro
+- Have company-specific tooling requirements
 
 ## Name Origin
 - "Cocoon" represents a protected, isolated environment where transformation happens

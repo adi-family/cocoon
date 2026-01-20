@@ -11,7 +11,7 @@ use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use uuid::Uuid;
 
@@ -671,6 +671,26 @@ async fn save_device_id(device_id: &str) {
     }
 }
 
+/// Send deregister message to signaling server
+async fn send_deregister(writer: &SharedWriter, device_id: &str, reason: Option<&str>) {
+    let deregister_msg = SignalingMessage::Deregister {
+        device_id: device_id.to_string(),
+        reason: reason.map(|r| r.to_string()),
+    };
+
+    let mut w = writer.lock().await;
+    if let Err(e) = w
+        .send(Message::Text(
+            serde_json::to_string(&deregister_msg).unwrap(),
+        ))
+        .await
+    {
+        tracing::warn!("⚠️ Failed to send deregister message: {}", e);
+    } else {
+        tracing::info!("📤 Sent deregister message to server");
+    }
+}
+
 /// Load or generate client secret for persistent device ID
 /// Returns (secret, optional_device_id)
 async fn get_or_create_secret() -> (String, Option<String>) {
@@ -845,179 +865,243 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("⏳ Waiting for derived device ID (first registration)...");
     }
 
-    // Main message loop
-    while let Some(msg_result) = read.next().await {
-        let msg = match msg_result {
-            Ok(msg) => msg,
-            Err(e) => {
-                tracing::error!("❌ WebSocket error: {}", e);
-                break;
-            }
-        };
+    // Track current device ID for deregistration
+    let current_device_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let current_device_id_for_loop = current_device_id.clone();
 
-        let text = match msg {
-            Message::Text(t) => t,
-            Message::Close(_) => {
-                tracing::info!("🔌 Connection closed");
-                break;
-            }
-            _ => continue,
-        };
+    // Setup shutdown signal handling
+    let (shutdown_tx, mut shutdown_rx) = broadcast::channel::<()>(1);
+    let writer_for_shutdown = writer.clone();
+    let device_id_for_shutdown = current_device_id.clone();
 
-        let message: SignalingMessage = match serde_json::from_str(&text) {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::warn!("⚠️ Invalid message: {}", e);
-                continue;
-            }
-        };
+    // Spawn signal handler task
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm =
+                signal(SignalKind::terminate()).expect("Failed to create SIGTERM handler");
+            let mut sigint =
+                signal(SignalKind::interrupt()).expect("Failed to create SIGINT handler");
 
-        match message {
-            SignalingMessage::Registered {
-                device_id: assigned_id,
-            } => {
-                tracing::info!("✅ Registration confirmed");
-                tracing::info!("🆔 Device ID: {}", assigned_id);
-                tracing::info!("");
-                tracing::info!("📋 To claim ownership:");
-                tracing::info!(
-                    "   Anyone with this secret can become an owner (co-ownership supported)"
-                );
-                tracing::info!("");
-                tracing::info!("   WebSocket message:");
-                tracing::info!(
-                    r#"   {{ "type": "claim_cocoon", "device_id": "{}", "secret": "{}", "access_token": "YOUR_TOKEN" }}"#,
-                    assigned_id,
-                    secret_for_claiming
-                );
-                tracing::info!("");
-                tracing::info!("   ⚠️  Share this secret only with trusted co-owners!");
-                tracing::info!("");
-
-                // Save device_id for future reconnections (enables verification)
-                save_device_id(&assigned_id).await;
-            }
-
-            SignalingMessage::RegisteredWithOwner {
-                device_id: assigned_id,
-                owner_id,
-                name,
-            } => {
-                tracing::info!("✅ Registration confirmed with auto-claim");
-                tracing::info!("🆔 Device ID: {}", assigned_id);
-                tracing::info!("👤 Owner: {}", owner_id);
-                if let Some(ref n) = name {
-                    tracing::info!("📛 Name: {}", n);
+            tokio::select! {
+                _ = sigterm.recv() => {
+                    tracing::info!("📥 Received SIGTERM, initiating graceful shutdown...");
                 }
-                tracing::info!("");
-                tracing::info!("🎉 Cocoon is ready and claimed by your account!");
-                tracing::info!("");
-
-                // Save device_id for future reconnections
-                save_device_id(&assigned_id).await;
-
-                // Clear setup token from env (one-time use)
-                // Note: Can't actually clear env var, but we could delete from config
+                _ = sigint.recv() => {
+                    tracing::info!("📥 Received SIGINT, initiating graceful shutdown...");
+                }
             }
+        }
 
-            SignalingMessage::SyncData { payload } => {
-                let request: CommandRequest = match serde_json::from_value(payload) {
-                    Ok(req) => req,
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+            tracing::info!("📥 Received Ctrl+C, initiating graceful shutdown...");
+        }
+
+        // Send deregister message before shutdown
+        if let Some(device_id) = device_id_for_shutdown.lock().await.as_ref() {
+            send_deregister(&writer_for_shutdown, device_id, Some("shutdown")).await;
+        }
+
+        // Signal shutdown to main loop
+        let _ = shutdown_tx.send(());
+    });
+
+    // Main message loop
+    loop {
+        tokio::select! {
+            _ = shutdown_rx.recv() => {
+                tracing::info!("🛑 Shutdown signal received, exiting main loop...");
+                break;
+            }
+            msg_result = read.next() => {
+                let msg = match msg_result {
+                    Some(Ok(msg)) => msg,
+                    Some(Err(e)) => {
+                        tracing::error!("❌ WebSocket error: {}", e);
+                        break;
+                    }
+                    None => {
+                        tracing::info!("🔌 Connection closed by server");
+                        break;
+                    }
+                };
+
+                let text = match msg {
+                    Message::Text(t) => t,
+                    Message::Close(_) => {
+                        tracing::info!("🔌 Connection closed");
+                        break;
+                    }
+                    _ => continue,
+                };
+
+                let message: SignalingMessage = match serde_json::from_str(&text) {
+                    Ok(m) => m,
                     Err(e) => {
-                        tracing::warn!("⚠️ Invalid command request: {}", e);
+                        tracing::warn!("⚠️ Invalid message: {}", e);
                         continue;
                     }
                 };
 
-                let writer_clone = writer.clone();
-                let sessions_clone = pty_sessions.clone();
-                let services_clone = services.clone();
-                let silk_sessions_clone = silk_sessions.clone();
+                match message {
+                    SignalingMessage::Registered {
+                        device_id: assigned_id,
+                    } => {
+                        tracing::info!("✅ Registration confirmed");
+                        tracing::info!("🆔 Device ID: {}", assigned_id);
+                        tracing::info!("");
+                        tracing::info!("📋 To claim ownership:");
+                        tracing::info!(
+                            "   Anyone with this secret can become an owner (co-ownership supported)"
+                        );
+                        tracing::info!("");
+                        tracing::info!("   WebSocket message:");
+                        tracing::info!(
+                            r#"   {{ "type": "claim_cocoon", "device_id": "{}", "secret": "{}", "access_token": "YOUR_TOKEN" }}"#,
+                            assigned_id,
+                            secret_for_claiming
+                        );
+                        tracing::info!("");
+                        tracing::info!("   ⚠️  Share this secret only with trusted co-owners!");
+                        tracing::info!("");
 
-                tokio::spawn(async move {
-                    let response: Option<CommandResponse> = match request {
-                        CommandRequest::Execute { command, input } => {
-                            tracing::info!("🚀 Executing: {}", command);
-                            Some(execute_command(&command, input.as_deref()).await)
+                        // Store device ID for deregistration
+                        *current_device_id_for_loop.lock().await = Some(assigned_id.clone());
+
+                        // Save device_id for future reconnections (enables verification)
+                        save_device_id(&assigned_id).await;
+                    }
+
+                    SignalingMessage::RegisteredWithOwner {
+                        device_id: assigned_id,
+                        owner_id,
+                        name,
+                    } => {
+                        tracing::info!("✅ Registration confirmed with auto-claim");
+                        tracing::info!("🆔 Device ID: {}", assigned_id);
+                        tracing::info!("👤 Owner: {}", owner_id);
+                        if let Some(ref n) = name {
+                            tracing::info!("📛 Name: {}", n);
                         }
+                        tracing::info!("");
+                        tracing::info!("🎉 Cocoon is ready and claimed by your account!");
+                        tracing::info!("");
 
-                        CommandRequest::AttachPty {
-                            command,
-                            cols,
-                            rows,
-                            env,
-                        } => {
-                            tracing::info!("🔗 Attaching PTY: {} ({}x{})", command, cols, rows);
+                        // Store device ID for deregistration
+                        *current_device_id_for_loop.lock().await = Some(assigned_id.clone());
 
-                            match create_pty_session(
-                                &command,
-                                cols,
-                                rows,
-                                &env,
-                                writer_clone.clone(),
-                            )
-                            .await
-                            {
-                                Ok((session_id, session)) => {
-                                    sessions_clone.lock().await.insert(session_id, session);
-                                    Some(CommandResponse::PtyCreated { session_id })
-                                }
-                                Err(e) => Some(CommandResponse::Error {
-                                    code: "pty_create_failed".into(),
-                                    message: e,
-                                }),
+                        // Save device_id for future reconnections
+                        save_device_id(&assigned_id).await;
+
+                        // Clear setup token from env (one-time use)
+                        // Note: Can't actually clear env var, but we could delete from config
+                    }
+
+                    SignalingMessage::Deregistered { device_id } => {
+                        tracing::info!("✅ Deregistration confirmed for device: {}", device_id);
+                    }
+
+                    SignalingMessage::SyncData { payload } => {
+                        let request: CommandRequest = match serde_json::from_value(payload) {
+                            Ok(req) => req,
+                            Err(e) => {
+                                tracing::warn!("⚠️ Invalid command request: {}", e);
+                                continue;
                             }
-                        }
+                        };
 
-                        CommandRequest::PtyInput { session_id, data } => {
-                            let mut sessions = sessions_clone.lock().await;
-                            if let Some(session) = sessions.get_mut(&session_id) {
-                                if let Err(e) =
-                                    std::io::Write::write_all(&mut session.writer, data.as_bytes())
-                                {
-                                    Some(CommandResponse::Error {
-                                        code: "pty_write_failed".into(),
-                                        message: e.to_string(),
-                                    })
-                                } else {
-                                    let _ = std::io::Write::flush(&mut session.writer);
-                                    None // No response needed for successful input
+                        let writer_clone = writer.clone();
+                        let sessions_clone = pty_sessions.clone();
+                        let services_clone = services.clone();
+                        let silk_sessions_clone = silk_sessions.clone();
+
+                        tokio::spawn(async move {
+                            let response: Option<CommandResponse> = match request {
+                                CommandRequest::Execute { command, input } => {
+                                    tracing::info!("🚀 Executing: {}", command);
+                                    Some(execute_command(&command, input.as_deref()).await)
                                 }
-                            } else {
-                                Some(CommandResponse::Error {
-                                    code: "session_not_found".into(),
-                                    message: format!("PTY session {} not found", session_id),
-                                })
-                            }
-                        }
 
-                        CommandRequest::PtyResize {
-                            session_id,
-                            cols,
-                            rows,
-                        } => {
-                            tracing::info!("📐 Resizing PTY {} to {}x{}", session_id, cols, rows);
-                            let sessions = sessions_clone.lock().await;
-                            if let Some(session) = sessions.get(&session_id) {
-                                if let Err(e) = session.pair.master.resize(PtySize {
-                                    rows,
+                                CommandRequest::AttachPty {
+                                    command,
                                     cols,
-                                    pixel_width: 0,
-                                    pixel_height: 0,
-                                }) {
-                                    Some(CommandResponse::Error {
-                                        code: "resize_failed".into(),
-                                        message: e.to_string(),
-                                    })
-                                } else {
-                                    None // No response needed for successful resize
+                                    rows,
+                                    env,
+                                } => {
+                                    tracing::info!("🔗 Attaching PTY: {} ({}x{})", command, cols, rows);
+
+                                    match create_pty_session(
+                                        &command,
+                                        cols,
+                                        rows,
+                                        &env,
+                                        writer_clone.clone(),
+                                    )
+                                    .await
+                                    {
+                                        Ok((session_id, session)) => {
+                                            sessions_clone.lock().await.insert(session_id, session);
+                                            Some(CommandResponse::PtyCreated { session_id })
+                                        }
+                                        Err(e) => Some(CommandResponse::Error {
+                                            code: "pty_create_failed".into(),
+                                            message: e,
+                                        }),
+                                    }
                                 }
-                            } else {
-                                Some(CommandResponse::Error {
-                                    code: "session_not_found".into(),
-                                    message: format!("PTY session {} not found", session_id),
-                                })
-                            }
+
+                                CommandRequest::PtyInput { session_id, data } => {
+                                    let mut sessions = sessions_clone.lock().await;
+                                    if let Some(session) = sessions.get_mut(&session_id) {
+                                        if let Err(e) =
+                                            std::io::Write::write_all(&mut session.writer, data.as_bytes())
+                                        {
+                                            Some(CommandResponse::Error {
+                                                code: "pty_write_failed".into(),
+                                                message: e.to_string(),
+                                            })
+                                        } else {
+                                            let _ = std::io::Write::flush(&mut session.writer);
+                                            None // No response needed for successful input
+                                        }
+                                    } else {
+                                        Some(CommandResponse::Error {
+                                            code: "session_not_found".into(),
+                                            message: format!("PTY session {} not found", session_id),
+                                        })
+                                    }
+                                }
+
+                                CommandRequest::PtyResize {
+                                    session_id,
+                                    cols,
+                                    rows,
+                                } => {
+                                    tracing::info!("📐 Resizing PTY {} to {}x{}", session_id, cols, rows);
+                                    let sessions = sessions_clone.lock().await;
+                                    if let Some(session) = sessions.get(&session_id) {
+                                        if let Err(e) = session.pair.master.resize(PtySize {
+                                            rows,
+                                            cols,
+                                            pixel_width: 0,
+                                            pixel_height: 0,
+                                        }) {
+                                            Some(CommandResponse::Error {
+                                                code: "resize_failed".into(),
+                                                message: e.to_string(),
+                                            })
+                                        } else {
+                                            None // No response needed for successful resize
+                                        }
+                                    } else {
+                                        Some(CommandResponse::Error {
+                                            code: "session_not_found".into(),
+                                            message: format!("PTY session {} not found", session_id),
+                                        })
+                                    }
                         }
 
                         CommandRequest::PtyClose { session_id } => {
@@ -1474,37 +1558,39 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     };
 
-                    // Send response (if any)
-                    if let Some(response) = response {
-                        let response_msg = SignalingMessage::SyncData {
-                            payload: serde_json::to_value(&response).unwrap(),
-                        };
+                                // Send response (if any)
+                                if let Some(response) = response {
+                                    let response_msg = SignalingMessage::SyncData {
+                                        payload: serde_json::to_value(&response).unwrap(),
+                                    };
 
-                        let mut w = writer_clone.lock().await;
-                        if let Err(e) = w
-                            .send(Message::Text(serde_json::to_string(&response_msg).unwrap()))
-                            .await
-                        {
-                            tracing::error!("❌ Failed to send response: {}", e);
+                                    let mut w = writer_clone.lock().await;
+                                    if let Err(e) = w
+                                        .send(Message::Text(serde_json::to_string(&response_msg).unwrap()))
+                                        .await
+                                    {
+                                        tracing::error!("❌ Failed to send response: {}", e);
+                                    }
+                                }
+                            });
                         }
+
+                    SignalingMessage::PeerConnected { peer_id } => {
+                        tracing::info!("👋 Peer connected: {}", peer_id);
                     }
-                });
-            }
 
-            SignalingMessage::PeerConnected { peer_id } => {
-                tracing::info!("👋 Peer connected: {}", peer_id);
-            }
+                    SignalingMessage::PeerDisconnected { peer_id } => {
+                        tracing::info!("👋 Peer disconnected: {}", peer_id);
+                    }
 
-            SignalingMessage::PeerDisconnected { peer_id } => {
-                tracing::info!("👋 Peer disconnected: {}", peer_id);
-            }
+                    SignalingMessage::Error { message } => {
+                        tracing::error!("❌ Server error: {}", message);
+                    }
 
-            SignalingMessage::Error { message } => {
-                tracing::error!("❌ Server error: {}", message);
-            }
-
-            _ => {
-                tracing::debug!("📨 Other message: {:?}", message);
+                    _ => {
+                        tracing::debug!("📨 Other message: {:?}", message);
+                    }
+                }
             }
         }
     }

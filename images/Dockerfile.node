@@ -1,0 +1,115 @@
+# Cocoon - Node.js
+# Size: ~200MB | Use: Node.js/TypeScript development
+# Tools: Node.js 22 LTS, npm, yarn, pnpm, bun
+#
+# Build: docker buildx bake node
+# Run:   docker run -e SIGNALING_SERVER_URL=wss://... git.the-ihor.com/adi/cocoon:node
+
+# =============================================================================
+# Stage 1: Build cocoon binary
+# =============================================================================
+FROM rust:1.85-alpine AS builder
+
+RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig
+
+WORKDIR /build
+
+COPY crates/lib/lib-tarminal-sync ./lib-tarminal-sync
+COPY crates/lib/lib-plugin-abi ./lib-plugin-abi
+COPY crates/cocoon/Cargo.toml ./Cargo.toml
+COPY crates/cocoon/src ./src
+COPY crates/cocoon/plugin.toml ./plugin.toml
+
+RUN sed -i 's|path = "../lib/lib-tarminal-sync"|path = "./lib-tarminal-sync"|g' Cargo.toml && \
+    sed -i 's|path = "../lib/lib-plugin-abi"|path = "./lib-plugin-abi"|g' Cargo.toml
+
+RUN cd lib-plugin-abi && \
+    sed -i 's|version.workspace = true|version = "0.1.0"|g' Cargo.toml && \
+    sed -i 's|edition.workspace = true|edition = "2021"|g' Cargo.toml && \
+    sed -i 's|authors.workspace = true|authors = ["ADI Team"]|g' Cargo.toml && \
+    sed -i 's|abi_stable.workspace = true|abi_stable = "0.11"|g' Cargo.toml
+
+RUN cargo build --release --features standalone
+
+# =============================================================================
+# Stage 2: Runtime (Node.js)
+# =============================================================================
+FROM node:22-slim
+
+LABEL org.opencontainers.image.title="Cocoon Node.js"
+LABEL org.opencontainers.image.description="Node.js-focused containerized worker environment"
+LABEL cocoon.variant="node"
+LABEL cocoon.tools="node22,npm,yarn,pnpm,bun,typescript,git,curl"
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Core utilities
+    ca-certificates \
+    curl \
+    wget \
+    git \
+    git-lfs \
+    jq \
+    tar \
+    gzip \
+    unzip \
+    # Build dependencies for native modules
+    build-essential \
+    python3 \
+    # Editors & tools
+    vim \
+    nano \
+    less \
+    htop \
+    # Network
+    openssh-client \
+    rsync \
+    # Shell
+    bash \
+    bash-completion \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Node.js package managers and tools
+RUN npm install -g \
+    yarn \
+    pnpm \
+    typescript \
+    ts-node \
+    tsx \
+    eslint \
+    prettier \
+    turbo \
+    nx \
+    @biomejs/biome
+
+# Install Bun
+RUN curl -fsSL https://bun.sh/install | bash
+ENV PATH="/root/.bun/bin:$PATH"
+
+# Copy cocoon binary
+COPY --from=builder /build/target/release/cocoon /usr/local/bin/cocoon
+
+# Setup workspace
+RUN mkdir -p /cocoon/workspace /cocoon/output
+WORKDIR /cocoon/workspace
+
+# Create non-root user
+RUN useradd -m -s /bin/bash cocoon && \
+    chown -R cocoon:cocoon /cocoon
+
+# Environment
+ENV SIGNALING_SERVER_URL=ws://signaling:8080/ws
+ENV COCOON_VARIANT=node
+ENV TERM=xterm-256color
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+ENV NODE_ENV=development
+ENV NPM_CONFIG_LOGLEVEL=warn
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD pgrep cocoon || exit 1
+
+CMD ["/usr/local/bin/cocoon"]

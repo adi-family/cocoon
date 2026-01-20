@@ -1,0 +1,158 @@
+# Cocoon - GPU (CUDA-enabled)
+# Size: ~2GB | Use: GPU workloads, ML inference, CUDA development
+# Tools: CUDA 12.4, cuDNN, Python, PyTorch-ready environment
+#
+# Build: docker buildx bake gpu
+# Run:   docker run --gpus all -e SIGNALING_SERVER_URL=wss://... git.the-ihor.com/adi/cocoon:gpu
+#
+# Requirements:
+#   - NVIDIA GPU with CUDA support
+#   - NVIDIA Container Toolkit installed on host
+#   - Linux host (GPU passthrough not supported on macOS/Windows Docker Desktop)
+
+# =============================================================================
+# Stage 1: Build cocoon binary
+# =============================================================================
+FROM rust:1.85-alpine AS builder
+
+RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig
+
+WORKDIR /build
+
+COPY crates/lib/lib-tarminal-sync ./lib-tarminal-sync
+COPY crates/lib/lib-plugin-abi ./lib-plugin-abi
+COPY crates/cocoon/Cargo.toml ./Cargo.toml
+COPY crates/cocoon/src ./src
+COPY crates/cocoon/plugin.toml ./plugin.toml
+
+RUN sed -i 's|path = "../lib/lib-tarminal-sync"|path = "./lib-tarminal-sync"|g' Cargo.toml && \
+    sed -i 's|path = "../lib/lib-plugin-abi"|path = "./lib-plugin-abi"|g' Cargo.toml
+
+RUN cd lib-plugin-abi && \
+    sed -i 's|version.workspace = true|version = "0.1.0"|g' Cargo.toml && \
+    sed -i 's|edition.workspace = true|edition = "2021"|g' Cargo.toml && \
+    sed -i 's|authors.workspace = true|authors = ["ADI Team"]|g' Cargo.toml && \
+    sed -i 's|abi_stable.workspace = true|abi_stable = "0.11"|g' Cargo.toml
+
+RUN cargo build --release --features standalone
+
+# =============================================================================
+# Stage 2: Runtime (NVIDIA CUDA)
+# =============================================================================
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+
+LABEL org.opencontainers.image.title="Cocoon GPU"
+LABEL org.opencontainers.image.description="CUDA-enabled containerized worker environment for GPU workloads"
+LABEL cocoon.variant="gpu"
+LABEL cocoon.tools="cuda12.4,cudnn,python3,pip,pytorch-ready,git,curl"
+LABEL cocoon.gpu="nvidia"
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install system tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Core utilities
+    ca-certificates \
+    curl \
+    wget \
+    git \
+    git-lfs \
+    jq \
+    tar \
+    gzip \
+    unzip \
+    # Build tools (for compiling Python packages)
+    build-essential \
+    pkg-config \
+    cmake \
+    # Python
+    python3 \
+    python3-pip \
+    python3-venv \
+    python3-dev \
+    # Editors & tools
+    vim \
+    nano \
+    less \
+    htop \
+    nvtop \
+    # Network
+    openssh-client \
+    rsync \
+    # System
+    sudo \
+    locales \
+    tzdata \
+    # Shell
+    bash \
+    bash-completion \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Setup locale
+RUN locale-gen en_US.UTF-8
+
+# Install Python ML tools (excluding PyTorch - let users install specific version)
+RUN pip3 install --no-cache-dir --upgrade pip && \
+    pip3 install --no-cache-dir \
+    virtualenv \
+    poetry \
+    uv \
+    # Data science essentials
+    numpy \
+    pandas \
+    scipy \
+    scikit-learn \
+    # ML utilities
+    transformers \
+    datasets \
+    accelerate \
+    safetensors \
+    huggingface_hub \
+    # Visualization
+    matplotlib \
+    seaborn \
+    # Dev tools
+    jupyter \
+    ipython \
+    black \
+    ruff \
+    pytest \
+    rich \
+    tqdm
+
+# Copy cocoon binary
+COPY --from=builder /build/target/release/cocoon /usr/local/bin/cocoon
+
+# Setup workspace
+RUN mkdir -p /cocoon/workspace /cocoon/output /cocoon/models
+WORKDIR /cocoon/workspace
+
+# Create non-root user with sudo and GPU access
+RUN useradd -m -s /bin/bash -G sudo,video cocoon && \
+    echo "cocoon ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers && \
+    chown -R cocoon:cocoon /cocoon
+
+# Environment
+ENV SIGNALING_SERVER_URL=ws://signaling:8080/ws
+ENV COCOON_VARIANT=gpu
+ENV TERM=xterm-256color
+ENV LANG=en_US.UTF-8
+ENV LC_ALL=en_US.UTF-8
+ENV TZ=UTC
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+# CUDA environment
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH="${CUDA_HOME}/bin:${PATH}"
+ENV LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}"
+# HuggingFace cache
+ENV HF_HOME=/cocoon/models
+ENV TRANSFORMERS_CACHE=/cocoon/models
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD pgrep cocoon || exit 1
+
+CMD ["/usr/local/bin/cocoon"]
