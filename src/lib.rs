@@ -7,8 +7,10 @@ mod interactive;
 mod runtime;
 mod self_update;
 pub mod silk;
+pub mod webrtc;
 
 pub use core::run;
+pub use webrtc::WebRtcManager;
 pub use runtime::{CocoonInfo, CocoonStatus, Runtime, RuntimeManager, RuntimeType};
 pub use silk::{AnsiToHtml, SilkSession};
 
@@ -554,21 +556,27 @@ extern "C" fn cli_invoke(
                                     Err(e) => RResult::RErr(ServiceError::new(1, e)),
                                 }
                             }
-                            Ok(RuntimeType::Machine) => match service_install() {
-                                Ok(msg) => {
-                                    println!("{}", msg);
-                                    if cmd_args.iter().any(|a| a == "--start") {
-                                        match service_start() {
-                                            Ok(start_msg) => println!("{}", start_msg),
-                                            Err(e) => {
-                                                println!("Warning: Failed to start service: {}", e)
+                            Ok(RuntimeType::Machine) => {
+                                // Stop existing service first (ignore errors - may not be running)
+                                let runtime = manager.get_runtime(RuntimeType::Machine);
+                                let _ = runtime.stop("cocoon");
+                                
+                                match service_install() {
+                                    Ok(msg) => {
+                                        println!("{}", msg);
+                                        if cmd_args.iter().any(|a| a == "--start") {
+                                            match service_start() {
+                                                Ok(start_msg) => println!("{}", start_msg),
+                                                Err(e) => {
+                                                    println!("Warning: Failed to start service: {}", e)
+                                                }
                                             }
                                         }
+                                        RResult::ROk(RString::from("Machine cocoon created"))
                                     }
-                                    RResult::ROk(RString::from("Machine cocoon created"))
+                                    Err(e) => RResult::RErr(ServiceError::new(1, e)),
                                 }
-                                Err(e) => RResult::RErr(ServiceError::new(1, e)),
-                            },
+                            }
                             Err(e) => RResult::RErr(ServiceError::new(1, e)),
                         }
                     } else {
@@ -580,25 +588,25 @@ extern "C" fn cli_invoke(
                     }
                 }
 
-                // Run natively in foreground
+                // Run natively in foreground (blocking - for use by launchd/systemd)
                 "run" => {
-                    std::thread::spawn(|| {
-                        let rt = match tokio::runtime::Runtime::new() {
-                            Ok(rt) => rt,
-                            Err(e) => {
-                                eprintln!("Failed to create runtime: {}", e);
-                                return;
-                            }
-                        };
+                    let rt = match tokio::runtime::Runtime::new() {
+                        Ok(rt) => rt,
+                        Err(e) => {
+                            return RResult::RErr(ServiceError::new(
+                                1,
+                                format!("Failed to create runtime: {}", e),
+                            ));
+                        }
+                    };
 
-                        rt.block_on(async {
-                            if let Err(e) = core::run().await {
-                                eprintln!("Cocoon error: {}", e);
-                            }
-                        });
+                    rt.block_on(async {
+                        if let Err(e) = core::run().await {
+                            eprintln!("Cocoon error: {}", e);
+                        }
                     });
 
-                    RResult::ROk(RString::from("Cocoon worker started in background"))
+                    RResult::ROk(RString::from("Cocoon stopped"))
                 }
 
                 // Check for updates

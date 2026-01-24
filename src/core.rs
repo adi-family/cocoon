@@ -800,6 +800,26 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let silk_sessions: Arc<Mutex<HashMap<Uuid, SilkSession>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
+    // WebRTC signaling channel for sending messages back through WebSocket
+    let (webrtc_tx, mut webrtc_rx) = tokio::sync::mpsc::unbounded_channel::<SignalingMessage>();
+
+    // WebRTC session manager
+    let webrtc_manager = Arc::new(crate::webrtc::WebRtcManager::new(webrtc_tx));
+
+    // Spawn task to forward WebRTC signaling messages to WebSocket
+    let writer_for_webrtc = writer.clone();
+    tokio::spawn(async move {
+        while let Some(msg) = webrtc_rx.recv().await {
+            let mut w = writer_for_webrtc.lock().await;
+            if let Err(e) = w
+                .send(Message::Text(serde_json::to_string(&msg).unwrap_or_default()))
+                .await
+            {
+                tracing::warn!("⚠️ Failed to send WebRTC signaling message: {}", e);
+            }
+        }
+    });
+
     // Service registry - parse from COCOON_SERVICES env var
     // Format: "service1:port1,service2:port2"
     // Example: "flowmap-api:8092,postgres:5432"
@@ -1585,6 +1605,138 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
                     SignalingMessage::Error { message } => {
                         tracing::error!("❌ Server error: {}", message);
+                    }
+
+                    // ========== WebRTC Session Handlers ==========
+                    SignalingMessage::WebRtcStartSession {
+                        session_id,
+                        device_id: client_id,
+                        ..
+                    } => {
+                        tracing::info!("🎥 WebRTC session request from {}: {}", client_id, session_id);
+                        
+                        // IMPORTANT: Create session synchronously to avoid race condition
+                        // The browser sends the offer immediately after this message,
+                        // so the session must exist before we process the next message.
+                        match webrtc_manager.create_session(session_id.clone()).await {
+                            Ok(()) => {
+                                tracing::info!("✅ WebRTC session {} created", session_id);
+                                // Session started confirmation is sent by signaling server
+                            }
+                            Err(e) => {
+                                tracing::error!("❌ Failed to create WebRTC session: {}", e);
+                                let error_msg = SignalingMessage::WebRtcError {
+                                    session_id,
+                                    code: "session_create_failed".to_string(),
+                                    message: e,
+                                };
+                                let mut w = writer.lock().await;
+                                let _ = w.send(Message::Text(serde_json::to_string(&error_msg).unwrap())).await;
+                            }
+                        }
+                    }
+
+                    SignalingMessage::WebRtcOffer { session_id, sdp } => {
+                        tracing::info!("📥 WebRTC offer received for session {}", session_id);
+                        let webrtc = webrtc_manager.clone();
+                        let writer_clone = writer.clone();
+                        let session_id_clone = session_id.clone();
+                        
+                        tokio::spawn(async move {
+                            match webrtc.handle_offer(&session_id_clone, &sdp).await {
+                                Ok(answer_sdp) => {
+                                    tracing::info!("📤 Sending WebRTC answer for session {}", session_id_clone);
+                                    let answer_msg = SignalingMessage::WebRtcAnswer {
+                                        session_id: session_id_clone,
+                                        sdp: answer_sdp,
+                                    };
+                                    let mut w = writer_clone.lock().await;
+                                    let _ = w.send(Message::Text(serde_json::to_string(&answer_msg).unwrap())).await;
+                                }
+                                Err(e) => {
+                                    tracing::error!("❌ Failed to handle WebRTC offer: {}", e);
+                                    let error_msg = SignalingMessage::WebRtcError {
+                                        session_id: session_id_clone,
+                                        code: "offer_failed".to_string(),
+                                        message: e,
+                                    };
+                                    let mut w = writer_clone.lock().await;
+                                    let _ = w.send(Message::Text(serde_json::to_string(&error_msg).unwrap())).await;
+                                }
+                            }
+                        });
+                    }
+
+                    SignalingMessage::WebRtcIceCandidate {
+                        session_id,
+                        candidate,
+                        sdp_mid,
+                        sdp_mline_index,
+                    } => {
+                        tracing::debug!("🧊 ICE candidate received for session {}", session_id);
+                        let webrtc = webrtc_manager.clone();
+                        
+                        tokio::spawn(async move {
+                            if let Err(e) = webrtc
+                                .add_ice_candidate(
+                                    &session_id,
+                                    &candidate,
+                                    sdp_mid.as_deref(),
+                                    sdp_mline_index,
+                                )
+                                .await
+                            {
+                                tracing::warn!("⚠️ Failed to add ICE candidate: {}", e);
+                            }
+                        });
+                    }
+
+                    SignalingMessage::WebRtcSessionEnded { session_id, reason } => {
+                        tracing::info!(
+                            "🔌 WebRTC session {} ended (reason: {:?})",
+                            session_id,
+                            reason.as_deref().unwrap_or("not specified")
+                        );
+                        let webrtc = webrtc_manager.clone();
+                        
+                        tokio::spawn(async move {
+                            let _ = webrtc.close_session(&session_id).await;
+                        });
+                    }
+
+                    SignalingMessage::WebRtcData {
+                        session_id: _,
+                        channel,
+                        data,
+                        binary,
+                    } => {
+                        // Handle incoming data from WebRTC data channel (via signaling fallback)
+                        tracing::debug!("📦 WebRTC data received: {} bytes on channel {}", data.len(), channel);
+                        
+                        // Process the data based on channel type
+                        match channel.as_str() {
+                            "terminal" => {
+                                // Forward to terminal processing
+                                // This could trigger command execution similar to SyncData
+                                tracing::debug!("Terminal data: {}", data);
+                            }
+                            "file-transfer" => {
+                                // Handle file transfer
+                                tracing::debug!("File transfer data: {} bytes, binary: {}", data.len(), binary);
+                            }
+                            _ => {
+                                tracing::debug!("Unknown channel: {}", channel);
+                            }
+                        }
+                    }
+
+                    SignalingMessage::WebRtcError { session_id, code, message } => {
+                        tracing::error!("❌ WebRTC error for session {}: {} - {}", session_id, code, message);
+                        let webrtc = webrtc_manager.clone();
+                        
+                        tokio::spawn(async move {
+                            let _ = webrtc.close_session(&session_id).await;
+                        });
                     }
 
                     _ => {
