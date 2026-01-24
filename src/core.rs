@@ -1692,11 +1692,19 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     SignalingMessage::WebRtcSessionEnded { session_id, reason } => {
-                        tracing::info!(
-                            "🔌 WebRTC session {} ended (reason: {:?})",
-                            session_id,
-                            reason.as_deref().unwrap_or("not specified")
-                        );
+                        let reason_str = reason.as_deref().unwrap_or("not specified");
+                        if reason_str == "session_replaced" {
+                            tracing::info!(
+                                "🔄 WebRTC session {} replaced by newer session from same client",
+                                session_id
+                            );
+                        } else {
+                            tracing::info!(
+                                "🔌 WebRTC session {} ended (reason: {})",
+                                session_id,
+                                reason_str
+                            );
+                        }
                         let webrtc = webrtc_manager.clone();
                         
                         tokio::spawn(async move {

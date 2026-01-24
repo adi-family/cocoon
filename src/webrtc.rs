@@ -32,6 +32,8 @@ pub struct WebRtcSession {
 pub struct WebRtcManager {
     sessions: Arc<Mutex<HashMap<String, WebRtcSession>>>,
     signaling_tx: mpsc::UnboundedSender<SignalingMessage>,
+    /// Timeout for closing peer connections (default: 5 seconds)
+    close_timeout: std::time::Duration,
 }
 
 impl WebRtcManager {
@@ -40,6 +42,20 @@ impl WebRtcManager {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             signaling_tx,
+            close_timeout: std::time::Duration::from_secs(5),
+        }
+    }
+
+    /// Create a new WebRTC manager with custom close timeout
+    #[cfg(test)]
+    pub fn with_close_timeout(
+        signaling_tx: mpsc::UnboundedSender<SignalingMessage>,
+        close_timeout: std::time::Duration,
+    ) -> Self {
+        Self {
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            signaling_tx,
+            close_timeout,
         }
     }
 
@@ -303,13 +319,36 @@ impl WebRtcManager {
     }
 
     /// Close a session
+    ///
+    /// Uses a timeout for the peer connection close to prevent hanging
+    /// when the connection was never fully established.
     pub async fn close_session(&self, session_id: &str) -> Result<(), String> {
         if let Some(session) = self.sessions.lock().await.remove(session_id) {
-            session
-                .peer_connection
-                .close()
-                .await
-                .map_err(|e| format!("Failed to close peer connection: {}", e))?;
+            // Use a timeout for close() as it can hang if the connection
+            // was never fully established (common in tests or rapid page refreshes)
+            let close_result = tokio::time::timeout(
+                self.close_timeout,
+                session.peer_connection.close(),
+            )
+            .await;
+
+            match close_result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        "Failed to close peer connection for session {}: {}",
+                        session_id,
+                        e
+                    );
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        "Timeout closing peer connection for session {} (this is often normal)",
+                        session_id
+                    );
+                    // Don't return error - the session is already removed from the map
+                }
+            }
         }
         Ok(())
     }
@@ -322,5 +361,448 @@ impl WebRtcManager {
             .keys()
             .cloned()
             .collect()
+    }
+
+    /// Get the number of active sessions
+    pub async fn session_count(&self) -> usize {
+        self.sessions.lock().await.len()
+    }
+
+    /// Check if a session exists
+    pub async fn session_exists(&self, session_id: &str) -> bool {
+        self.sessions.lock().await.contains_key(session_id)
+    }
+
+    /// Get session state
+    pub async fn get_session_state(&self, session_id: &str) -> Option<String> {
+        self.sessions
+            .lock()
+            .await
+            .get(session_id)
+            .map(|s| s.state.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::mpsc;
+
+    /// Helper to create a WebRtcManager for testing
+    /// Uses a short close timeout (100ms) to speed up tests
+    fn create_test_manager() -> (WebRtcManager, mpsc::UnboundedReceiver<SignalingMessage>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        // Use very short timeout for tests - close() will timeout but that's fine
+        // since we're just testing the session management logic
+        let manager =
+            WebRtcManager::with_close_timeout(tx, std::time::Duration::from_millis(100));
+        (manager, rx)
+    }
+
+    #[tokio::test]
+    async fn test_create_single_session() {
+        let (manager, _rx) = create_test_manager();
+
+        let result = manager.create_session("session-1".to_string()).await;
+        assert!(result.is_ok(), "Failed to create session: {:?}", result);
+
+        assert!(manager.session_exists("session-1").await);
+        assert_eq!(manager.session_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_create_multiple_sessions_sequentially() {
+        let (manager, _rx) = create_test_manager();
+
+        // Create 5 sessions sequentially
+        for i in 1..=5 {
+            let session_id = format!("session-{}", i);
+            let result = manager.create_session(session_id.clone()).await;
+            assert!(
+                result.is_ok(),
+                "Failed to create session {}: {:?}",
+                i,
+                result
+            );
+            assert!(manager.session_exists(&session_id).await);
+        }
+
+        assert_eq!(manager.session_count().await, 5);
+
+        // Verify all sessions exist
+        let sessions = manager.list_sessions().await;
+        for i in 1..=5 {
+            assert!(
+                sessions.contains(&format!("session-{}", i)),
+                "Session {} not found in list",
+                i
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_multiple_sessions_concurrently() {
+        let (manager, _rx) = create_test_manager();
+        let manager = Arc::new(manager);
+
+        // Create 10 sessions concurrently
+        let mut handles = vec![];
+        for i in 1..=10 {
+            let manager_clone = manager.clone();
+            let handle = tokio::spawn(async move {
+                let session_id = format!("concurrent-session-{}", i);
+                manager_clone.create_session(session_id).await
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all to complete
+        let results: Vec<_> = futures::future::join_all(handles).await;
+
+        // All should succeed
+        for (i, result) in results.into_iter().enumerate() {
+            let inner_result = result.expect("Task panicked");
+            assert!(
+                inner_result.is_ok(),
+                "Concurrent session {} failed: {:?}",
+                i + 1,
+                inner_result
+            );
+        }
+
+        assert_eq!(manager.session_count().await, 10);
+    }
+
+    #[tokio::test]
+    async fn test_close_session_and_cleanup() {
+        let (manager, _rx) = create_test_manager();
+
+        // Create a session
+        manager
+            .create_session("session-to-close".to_string())
+            .await
+            .expect("Failed to create session");
+        assert!(manager.session_exists("session-to-close").await);
+
+        // Close it
+        manager
+            .close_session("session-to-close")
+            .await
+            .expect("Failed to close session");
+
+        // Verify it's removed
+        assert!(!manager.session_exists("session-to-close").await);
+        assert_eq!(manager.session_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_recreate_session_after_close() {
+        let (manager, _rx) = create_test_manager();
+
+        // Create initial session
+        manager
+            .create_session("recyclable-session".to_string())
+            .await
+            .expect("Failed to create initial session");
+        assert!(manager.session_exists("recyclable-session").await);
+
+        // Close it
+        manager
+            .close_session("recyclable-session")
+            .await
+            .expect("Failed to close session");
+        assert!(!manager.session_exists("recyclable-session").await);
+
+        // Recreate with same ID - THIS IS THE KEY TEST FOR THE BUG
+        let result = manager
+            .create_session("recyclable-session".to_string())
+            .await;
+        assert!(
+            result.is_ok(),
+            "Failed to recreate session after close: {:?}",
+            result
+        );
+        assert!(manager.session_exists("recyclable-session").await);
+    }
+
+    #[tokio::test]
+    async fn test_session_lifecycle_multiple_cycles() {
+        let (manager, _rx) = create_test_manager();
+
+        // Run 5 create-close cycles on the same session ID
+        for cycle in 1..=5 {
+            let result = manager
+                .create_session("lifecycle-test".to_string())
+                .await;
+            assert!(
+                result.is_ok(),
+                "Cycle {}: Failed to create session: {:?}",
+                cycle,
+                result
+            );
+            assert!(
+                manager.session_exists("lifecycle-test").await,
+                "Cycle {}: Session should exist after creation",
+                cycle
+            );
+
+            manager
+                .close_session("lifecycle-test")
+                .await
+                .expect(&format!("Cycle {}: Failed to close session", cycle));
+            assert!(
+                !manager.session_exists("lifecycle-test").await,
+                "Cycle {}: Session should not exist after close",
+                cycle
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_close_nonexistent_session() {
+        let (manager, _rx) = create_test_manager();
+
+        // Should not error on closing non-existent session
+        let result = manager.close_session("nonexistent").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_multiple_sessions_independent_lifecycle() {
+        let (manager, _rx) = create_test_manager();
+
+        // Create 3 sessions
+        manager
+            .create_session("session-a".to_string())
+            .await
+            .expect("Failed to create session-a");
+        manager
+            .create_session("session-b".to_string())
+            .await
+            .expect("Failed to create session-b");
+        manager
+            .create_session("session-c".to_string())
+            .await
+            .expect("Failed to create session-c");
+
+        assert_eq!(manager.session_count().await, 3);
+
+        // Close middle session
+        manager
+            .close_session("session-b")
+            .await
+            .expect("Failed to close session-b");
+
+        // Verify others still exist
+        assert!(manager.session_exists("session-a").await);
+        assert!(!manager.session_exists("session-b").await);
+        assert!(manager.session_exists("session-c").await);
+        assert_eq!(manager.session_count().await, 2);
+
+        // Recreate session-b
+        manager
+            .create_session("session-b".to_string())
+            .await
+            .expect("Failed to recreate session-b");
+
+        assert_eq!(manager.session_count().await, 3);
+        assert!(manager.session_exists("session-b").await);
+    }
+
+    #[tokio::test]
+    async fn test_initial_session_state() {
+        let (manager, _rx) = create_test_manager();
+
+        manager
+            .create_session("state-test".to_string())
+            .await
+            .expect("Failed to create session");
+
+        let state = manager.get_session_state("state-test").await;
+        assert_eq!(state, Some("pending".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_session_not_found_returns_none() {
+        let (manager, _rx) = create_test_manager();
+
+        let state = manager.get_session_state("nonexistent").await;
+        assert!(state.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_rapid_create_close_cycles() {
+        let (manager, _rx) = create_test_manager();
+        let manager = Arc::new(manager);
+
+        // Simulate rapid page refresh scenario - 20 rapid cycles
+        for i in 1..=20 {
+            let result = manager.create_session(format!("rapid-{}", i)).await;
+            assert!(
+                result.is_ok(),
+                "Rapid cycle {}: create failed: {:?}",
+                i,
+                result
+            );
+
+            // Immediately close
+            manager
+                .close_session(&format!("rapid-{}", i))
+                .await
+                .expect(&format!("Rapid cycle {}: close failed", i));
+        }
+
+        // All should be cleaned up
+        assert_eq!(manager.session_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_create_and_close() {
+        let (manager, _rx) = create_test_manager();
+        let manager = Arc::new(manager);
+
+        // Create 10 sessions
+        for i in 1..=10 {
+            manager
+                .create_session(format!("cc-session-{}", i))
+                .await
+                .expect("Failed to create session");
+        }
+
+        // Concurrently close half and create new ones
+        let mut handles = vec![];
+
+        // Close odd sessions
+        for i in (1..=10).step_by(2) {
+            let manager_clone = manager.clone();
+            let handle = tokio::spawn(async move {
+                manager_clone
+                    .close_session(&format!("cc-session-{}", i))
+                    .await
+            });
+            handles.push(handle);
+        }
+
+        // Create new sessions
+        for i in 11..=15 {
+            let manager_clone = manager.clone();
+            let handle = tokio::spawn(async move {
+                manager_clone
+                    .create_session(format!("cc-session-{}", i))
+                    .await
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all
+        let results: Vec<_> = futures::future::join_all(handles).await;
+
+        // All operations should succeed
+        for result in results {
+            let inner = result.expect("Task panicked");
+            assert!(inner.is_ok(), "Operation failed: {:?}", inner);
+        }
+
+        // Should have: 5 even (2,4,6,8,10) + 5 new (11-15) = 10 sessions
+        assert_eq!(manager.session_count().await, 10);
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_session_id_overwrites() {
+        let (manager, _rx) = create_test_manager();
+
+        // Create session
+        manager
+            .create_session("duplicate-test".to_string())
+            .await
+            .expect("Failed to create first session");
+
+        // Create again with same ID (should overwrite)
+        let result = manager.create_session("duplicate-test".to_string()).await;
+        assert!(result.is_ok(), "Second create should succeed");
+
+        // Should still be just 1 session
+        assert_eq!(manager.session_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_handle_offer_nonexistent_session() {
+        let (manager, _rx) = create_test_manager();
+
+        let result = manager.handle_offer("nonexistent", "v=0\r\n").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_add_ice_candidate_nonexistent_session() {
+        let (manager, _rx) = create_test_manager();
+
+        let result = manager
+            .add_ice_candidate("nonexistent", "candidate:...", None, None)
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_send_data_nonexistent_session() {
+        let (manager, _rx) = create_test_manager();
+
+        let result = manager
+            .send_data("nonexistent", "channel", "data", false)
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_stress_many_sessions() {
+        let (manager, _rx) = create_test_manager();
+        let manager = Arc::new(manager);
+
+        // Create 50 sessions concurrently
+        let mut handles = vec![];
+        for i in 1..=50 {
+            let manager_clone = manager.clone();
+            let handle = tokio::spawn(async move {
+                manager_clone
+                    .create_session(format!("stress-{}", i))
+                    .await
+            });
+            handles.push(handle);
+        }
+
+        let results: Vec<_> = futures::future::join_all(handles).await;
+
+        let success_count = results
+            .into_iter()
+            .filter(|r| r.is_ok() && r.as_ref().unwrap().is_ok())
+            .count();
+
+        assert_eq!(success_count, 50, "All 50 sessions should be created");
+        assert_eq!(manager.session_count().await, 50);
+
+        // Now close all 50 concurrently
+        let mut close_handles = vec![];
+        for i in 1..=50 {
+            let manager_clone = manager.clone();
+            let handle = tokio::spawn(async move {
+                manager_clone
+                    .close_session(&format!("stress-{}", i))
+                    .await
+            });
+            close_handles.push(handle);
+        }
+
+        let close_results: Vec<_> = futures::future::join_all(close_handles).await;
+
+        let close_success = close_results
+            .into_iter()
+            .filter(|r| r.is_ok() && r.as_ref().unwrap().is_ok())
+            .count();
+
+        assert_eq!(close_success, 50, "All 50 sessions should be closed");
+        assert_eq!(manager.session_count().await, 0);
     }
 }
