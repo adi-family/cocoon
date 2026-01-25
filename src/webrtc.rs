@@ -16,6 +16,7 @@
 //!
 //! If no ICE servers are configured, defaults to Google's public STUN server.
 
+use crate::filesystem::{FileSystemRequest, handle_request as handle_fs_request};
 use lib_tarminal_sync::SignalingMessage;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -320,10 +321,12 @@ impl WebRtcManager {
                 let dc_label_clone = dc_label.clone();
                 let session_id_clone = session_id.clone();
                 let tx_clone = tx.clone();
+                let dc_clone = dc.clone();
                 dc.on_message(Box::new(move |msg: DataChannelMessage| {
                     let session_id = session_id_clone.clone();
                     let channel = dc_label_clone.clone();
                     let tx = tx_clone.clone();
+                    let dc_for_response = dc_clone.clone();
 
                     Box::pin(async move {
                         let (data, binary) = if msg.is_string {
@@ -332,7 +335,50 @@ impl WebRtcManager {
                             (base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &msg.data), true)
                         };
 
-                        // Forward through signaling (for processing)
+                        // Handle "file" channel for filesystem operations
+                        if channel == "file" {
+                            tracing::debug!("📁 File system request received: {} bytes", data.len());
+                            
+                            // Parse the request
+                            match serde_json::from_str::<FileSystemRequest>(&data) {
+                                Ok(request) => {
+                                    // Handle the filesystem request
+                                    let response = handle_fs_request(request).await;
+                                    
+                                    // Serialize response
+                                    match serde_json::to_string(&response) {
+                                        Ok(response_json) => {
+                                            // Send response back through the data channel
+                                            let response_len = response_json.len();
+                                            if let Err(e) = dc_for_response.send(&response_json.into_bytes().into()).await {
+                                                tracing::error!("❌ Failed to send filesystem response: {}", e);
+                                            } else {
+                                                tracing::debug!("📤 Filesystem response sent: {} bytes", response_len);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::error!("❌ Failed to serialize filesystem response: {}", e);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!("⚠️ Invalid filesystem request: {}", e);
+                                    // Send error response
+                                    let error_response = serde_json::json!({
+                                        "type": "fs_error",
+                                        "request_id": "",
+                                        "code": "invalid_request",
+                                        "message": format!("Failed to parse request: {}", e)
+                                    });
+                                    if let Ok(error_json) = serde_json::to_string(&error_response) {
+                                        let _ = dc_for_response.send(&error_json.into_bytes().into()).await;
+                                    }
+                                }
+                            }
+                            return;
+                        }
+
+                        // Forward other channels through signaling (for processing)
                         let _ = tx.send(SignalingMessage::WebRtcData {
                             session_id,
                             channel,

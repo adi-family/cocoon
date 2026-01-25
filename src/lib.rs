@@ -3,6 +3,7 @@
 //! Remote containerized worker with PTY support and signaling server connectivity.
 
 mod core;
+pub mod filesystem;
 mod interactive;
 mod runtime;
 mod self_update;
