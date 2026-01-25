@@ -2,6 +2,19 @@
 //!
 //! Provides WebRTC peer connection management for low-latency, direct
 //! communication between browser clients and cocoons.
+//!
+//! ## Configuration
+//!
+//! ICE servers can be configured via environment variables:
+//!
+//! - `WEBRTC_ICE_SERVERS`: Comma-separated list of STUN/TURN server URLs
+//!   Example: `stun:stun.l.google.com:19302,turn:turn.example.com:3478`
+//!
+//! - `WEBRTC_TURN_USERNAME`: Username for TURN server authentication
+//!
+//! - `WEBRTC_TURN_CREDENTIAL`: Credential/password for TURN server authentication
+//!
+//! If no ICE servers are configured, defaults to Google's public STUN server.
 
 use lib_tarminal_sync::SignalingMessage;
 use std::collections::HashMap;
@@ -19,6 +32,76 @@ use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
+
+/// Build ICE server configuration from environment variables
+///
+/// Environment variables:
+/// - `WEBRTC_ICE_SERVERS`: Comma-separated list of STUN/TURN URLs
+/// - `WEBRTC_TURN_USERNAME`: Username for TURN authentication
+/// - `WEBRTC_TURN_CREDENTIAL`: Credential for TURN authentication
+fn build_ice_servers() -> Vec<RTCIceServer> {
+    let ice_servers_env = std::env::var("WEBRTC_ICE_SERVERS").ok();
+    let turn_username = std::env::var("WEBRTC_TURN_USERNAME").ok();
+    let turn_credential = std::env::var("WEBRTC_TURN_CREDENTIAL").ok();
+
+    let urls: Vec<String> = ice_servers_env
+        .as_ref()
+        .map(|s| s.split(',').map(|u| u.trim().to_string()).filter(|u| !u.is_empty()).collect())
+        .unwrap_or_default();
+
+    if urls.is_empty() {
+        // Default to Google's public STUN server
+        tracing::info!("No WEBRTC_ICE_SERVERS configured, using default Google STUN server");
+        return vec![RTCIceServer {
+            urls: vec!["stun:stun.l.google.com:19302".to_string()],
+            ..Default::default()
+        }];
+    }
+
+    // Separate STUN and TURN servers
+    let stun_urls: Vec<String> = urls.iter().filter(|u| u.starts_with("stun:")).cloned().collect();
+    let turn_urls: Vec<String> = urls.iter().filter(|u| u.starts_with("turn:") || u.starts_with("turns:")).cloned().collect();
+
+    let mut ice_servers = Vec::new();
+
+    // Add STUN servers (no auth needed)
+    if !stun_urls.is_empty() {
+        tracing::info!("Configured {} STUN server(s): {:?}", stun_urls.len(), stun_urls);
+        ice_servers.push(RTCIceServer {
+            urls: stun_urls,
+            ..Default::default()
+        });
+    }
+
+    // Add TURN servers (with auth if provided)
+    if !turn_urls.is_empty() {
+        let has_credentials = turn_username.is_some() && turn_credential.is_some();
+        tracing::info!(
+            "Configured {} TURN server(s): {:?} (credentials: {})",
+            turn_urls.len(),
+            turn_urls,
+            if has_credentials { "provided" } else { "none" }
+        );
+
+        ice_servers.push(RTCIceServer {
+            urls: turn_urls,
+            username: turn_username.unwrap_or_default(),
+            credential: turn_credential.unwrap_or_default(),
+            ..Default::default()
+        });
+    }
+
+    // If we somehow ended up with an empty list, add default STUN
+    if ice_servers.is_empty() {
+        tracing::warn!("No valid ICE servers found, falling back to default Google STUN");
+        ice_servers.push(RTCIceServer {
+            urls: vec!["stun:stun.l.google.com:19302".to_string()],
+            ..Default::default()
+        });
+    }
+
+    ice_servers
+}
 
 /// WebRTC session state
 pub struct WebRtcSession {
@@ -61,13 +144,9 @@ impl WebRtcManager {
 
     /// Create a new WebRTC peer connection for a session
     pub async fn create_session(&self, session_id: String) -> Result<(), String> {
+        let ice_servers = build_ice_servers();
         let config = RTCConfiguration {
-            ice_servers: vec![
-                RTCIceServer {
-                    urls: vec!["stun:stun.l.google.com:19302".to_string()],
-                    ..Default::default()
-                },
-            ],
+            ice_servers,
             ..Default::default()
         };
 
@@ -108,6 +187,25 @@ impl WebRtcManager {
             Box::pin(async move {
                 if let Some(c) = candidate {
                     if let Ok(json) = c.to_json() {
+                        // Log ICE candidate type for debugging connectivity issues
+                        let candidate_type = if json.candidate.contains("typ host") {
+                            "host"
+                        } else if json.candidate.contains("typ srflx") {
+                            "srflx (STUN)"
+                        } else if json.candidate.contains("typ relay") {
+                            "relay (TURN)"
+                        } else if json.candidate.contains("typ prflx") {
+                            "prflx"
+                        } else {
+                            "unknown"
+                        };
+                        tracing::debug!(
+                            "🧊 ICE candidate gathered for session {}: type={}, mid={:?}",
+                            session_id,
+                            candidate_type,
+                            json.sdp_mid
+                        );
+
                         let _ = tx.send(SignalingMessage::WebRtcIceCandidate {
                             session_id,
                             candidate: json.candidate,
@@ -115,7 +213,36 @@ impl WebRtcManager {
                             sdp_mline_index: json.sdp_mline_index.map(|i| i as u32),
                         });
                     }
+                } else {
+                    // End of ICE gathering
+                    tracing::debug!("🧊 ICE gathering complete for session {}", session_id);
                 }
+            })
+        }));
+
+        // Set up ICE gathering state handler for debugging
+        let session_id_clone = session_id.clone();
+        peer_connection.on_ice_gathering_state_change(Box::new(move |state| {
+            let session_id = session_id_clone.clone();
+            Box::pin(async move {
+                tracing::debug!(
+                    "🧊 ICE gathering state for session {}: {:?}",
+                    session_id,
+                    state
+                );
+            })
+        }));
+
+        // Set up ICE connection state handler for debugging
+        let session_id_clone = session_id.clone();
+        peer_connection.on_ice_connection_state_change(Box::new(move |state| {
+            let session_id = session_id_clone.clone();
+            Box::pin(async move {
+                tracing::info!(
+                    "🧊 ICE connection state for session {}: {:?}",
+                    session_id,
+                    state
+                );
             })
         }));
 
@@ -133,6 +260,7 @@ impl WebRtcManager {
 
                 match state {
                     RTCPeerConnectionState::Connected => {
+                        tracing::info!("✅ WebRTC session {} connected successfully!", session_id);
                         if let Some(session) = sessions.lock().await.get_mut(&session_id) {
                             session.state = "connected".to_string();
                         }
@@ -142,7 +270,14 @@ impl WebRtcManager {
                     | RTCPeerConnectionState::Closed => {
                         let reason = match state {
                             RTCPeerConnectionState::Disconnected => "disconnected",
-                            RTCPeerConnectionState::Failed => "failed",
+                            RTCPeerConnectionState::Failed => {
+                                tracing::warn!(
+                                    "❌ WebRTC session {} failed - this often indicates ICE connectivity issues. \
+                                    Check WEBRTC_ICE_SERVERS config and ensure TURN server is available for NAT traversal.",
+                                    session_id
+                                );
+                                "failed"
+                            }
                             RTCPeerConnectionState::Closed => "closed",
                             _ => "unknown",
                         };
@@ -257,7 +392,7 @@ impl WebRtcManager {
         Ok(answer.sdp)
     }
 
-    /// Add an ICE candidate
+    /// Add an ICE candidate from remote peer
     pub async fn add_ice_candidate(
         &self,
         session_id: &str,
@@ -265,6 +400,25 @@ impl WebRtcManager {
         sdp_mid: Option<&str>,
         sdp_mline_index: Option<u32>,
     ) -> Result<(), String> {
+        // Log remote ICE candidate for debugging
+        let candidate_type = if candidate.contains("typ host") {
+            "host"
+        } else if candidate.contains("typ srflx") {
+            "srflx (STUN)"
+        } else if candidate.contains("typ relay") {
+            "relay (TURN)"
+        } else if candidate.contains("typ prflx") {
+            "prflx"
+        } else {
+            "unknown"
+        };
+        tracing::debug!(
+            "🧊 Remote ICE candidate received for session {}: type={}, mid={:?}",
+            session_id,
+            candidate_type,
+            sdp_mid
+        );
+
         let sessions = self.sessions.lock().await;
         let session = sessions
             .get(session_id)

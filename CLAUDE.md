@@ -545,6 +545,40 @@ When using `adi cocoon` CLI, prefer flags over environment variables:
 - `HMAC_SALT`: Salt for device ID derivation (set for persistent device IDs across restarts)
 - `PORT`: Server port (default: 8080)
 
+### WebRTC Configuration (Optional)
+WebRTC is used for low-latency peer-to-peer communication. If WebRTC connections fail after ~30 seconds, this usually indicates ICE connectivity issues.
+
+**Environment Variables:**
+- `WEBRTC_ICE_SERVERS`: Comma-separated list of STUN/TURN server URLs
+  - Default: `stun:stun.l.google.com:19302` (Google's public STUN)
+  - Example: `stun:stun.l.google.com:19302,turn:turn.example.com:3478`
+- `WEBRTC_TURN_USERNAME`: Username for TURN server authentication
+- `WEBRTC_TURN_CREDENTIAL`: Credential/password for TURN server authentication
+
+**When to configure TURN:**
+- Both peers are behind symmetric NAT (most corporate/cloud networks)
+- STUN-only connections consistently fail
+- Need guaranteed connectivity through firewalls
+
+**Example with Coturn TURN server:**
+```bash
+docker run -d \
+  -e SIGNALING_SERVER_URL=wss://adi.the-ihor.com/api/signaling/ws \
+  -e WEBRTC_ICE_SERVERS="stun:stun.l.google.com:19302,turn:your-turn-server.com:3478" \
+  -e WEBRTC_TURN_USERNAME="turnuser" \
+  -e WEBRTC_TURN_CREDENTIAL="turnpassword" \
+  -v cocoon-data:/cocoon \
+  git.the-ihor.com/adi/cocoon:latest
+```
+
+**Free TURN servers (for testing only):**
+- OpenRelay: `turn:openrelay.metered.ca:80` (requires registration)
+- Twilio: Requires account, provides TURN-as-a-service
+
+**Self-hosted TURN (recommended for production):**
+- [Coturn](https://github.com/coturn/coturn) - Most popular open-source TURN server
+- Deploy on a VPS with public IP for best results
+
 ## Command Protocol
 
 ### Execute (Simple Command)
