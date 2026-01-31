@@ -20,9 +20,7 @@ standalone = []
 
 [dependencies]
 # Plugin ABI
-lib-plugin-abi = { path = "../lib/lib-plugin-abi" }
-abi_stable = "0.11"
-once_cell = "1.19"
+lib-plugin-abi-v3 = { path = "../lib/lib-plugin-abi-v3" }
 
 # Interactive CLI
 inquire = "0.7"
