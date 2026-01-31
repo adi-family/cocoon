@@ -17,7 +17,7 @@
 //! If no ICE servers are configured, defaults to Google's public STUN server.
 
 use crate::filesystem::{FileSystemRequest, handle_request as handle_fs_request};
-use lib_tarminal_sync::SignalingMessage;
+use lib_signaling_protocol::SignalingMessage;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};

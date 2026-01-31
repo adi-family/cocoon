@@ -4,7 +4,7 @@
 //! executes commands, and returns output as structured data with ANSI-to-HTML conversion.
 //! Interactive commands are automatically detected and spawned in a separate PTY.
 
-use lib_tarminal_sync::SilkHtmlSpan;
+use lib_signaling_protocol::SilkHtmlSpan;
 use std::collections::HashMap;
 use std::process::{Child, Command, Stdio};
 use uuid::Uuid;

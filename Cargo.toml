@@ -36,7 +36,7 @@ base64 = "0.22"
 walkdir = "2"
 futures = "0.3"
 uuid = { version = "1", features = ["v4", "serde"] }
-lib-tarminal-sync = { path = "../lib/lib-tarminal-sync" }
+lib-signaling-protocol = { path = "../lib/lib-signaling-protocol" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 portable-pty = "0.8"

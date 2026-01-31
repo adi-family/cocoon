@@ -1,6 +1,6 @@
 use crate::silk::{AnsiToHtml, SilkSession};
 use futures::{SinkExt, StreamExt};
-use lib_tarminal_sync::{QueryType, SignalingMessage, SilkResponse, SilkStream};
+use lib_signaling_protocol::{QueryType, SignalingMessage, SilkResponse, SilkStream};
 use portable_pty::{CommandBuilder, PtySize};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
