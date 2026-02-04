@@ -2,18 +2,24 @@
 //!
 //! Remote containerized worker with PTY support and signaling server connectivity.
 
+pub mod adi_router;
 mod core;
 pub mod filesystem;
 mod interactive;
 mod runtime;
 mod self_update;
+pub mod services;
 pub mod silk;
 pub mod webrtc;
 
+pub use adi_router::{AdiHandleResult, AdiRouter, AdiService, AdiServiceError, create_stream_channel, StreamSender};
 pub use core::run;
 pub use runtime::{CocoonInfo, CocoonStatus, Runtime, RuntimeManager, RuntimeType};
 pub use silk::{AnsiToHtml, SilkSession};
 pub use webrtc::WebRtcManager;
+
+#[cfg(feature = "adi-tasks-core")]
+pub use services::TasksService;
 
 use base64::Engine;
 use lib_plugin_abi_v3::{

@@ -15,8 +15,9 @@ required-features = ["standalone"]
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = []
+default = ["services"]
 standalone = []
+services = ["adi-tasks-core"]
 
 [dependencies]
 # Plugin ABI
@@ -30,6 +31,10 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "fs", "p
 tokio-tungstenite = "0.24"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+async-trait = "0.1"
+
+# ADI services (optional, for embedded service support)
+adi-tasks-core = { path = "../adi-tasks/core", optional = true }
 base64 = "0.22"
 walkdir = "2"
 futures = "0.3"
@@ -50,6 +55,9 @@ webrtc = "0.11"
 # Filesystem support
 chrono = "0.4"
 glob = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
 
 [profile.release]
 opt-level = "z"

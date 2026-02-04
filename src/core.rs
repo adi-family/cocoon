@@ -1,3 +1,4 @@
+use crate::adi_router::AdiRouter;
 use crate::silk::{AnsiToHtml, SilkSession};
 use futures::{SinkExt, StreamExt};
 use lib_signaling_protocol::{QueryType, SignalingMessage, SilkResponse, SilkStream};
@@ -800,11 +801,41 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let silk_sessions: Arc<Mutex<HashMap<Uuid, SilkSession>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
+    // ADI service router - register services for WebRTC "adi" channel
+    let adi_router = {
+        let mut router = AdiRouter::new();
+        
+        // Register tasks service if enabled
+        #[cfg(feature = "adi-tasks-core")]
+        {
+            match crate::services::TasksService::new_global() {
+                Ok(tasks_service) => {
+                    router.register(std::sync::Arc::new(tasks_service));
+                    tracing::info!("📦 Registered ADI service: tasks");
+                }
+                Err(e) => {
+                    tracing::warn!("⚠️ Failed to initialize tasks service: {}", e);
+                }
+            }
+        }
+        
+        // Register tools service (always available)
+        let tools_service = crate::services::ToolsService::new();
+        let tool_count = tools_service.list_all_tools().len();
+        router.register(std::sync::Arc::new(tools_service));
+        tracing::info!("📦 Registered ADI service: tools ({} tools)", tool_count);
+        
+        Arc::new(Mutex::new(router))
+    };
+
     // WebRTC signaling channel for sending messages back through WebSocket
     let (webrtc_tx, mut webrtc_rx) = tokio::sync::mpsc::unbounded_channel::<SignalingMessage>();
 
-    // WebRTC session manager
-    let webrtc_manager = Arc::new(crate::webrtc::WebRtcManager::new(webrtc_tx));
+    // WebRTC session manager with ADI router
+    let webrtc_manager = Arc::new(crate::webrtc::WebRtcManager::with_adi_router(
+        webrtc_tx,
+        adi_router,
+    ));
 
     // Spawn task to forward WebRTC signaling messages to WebSocket
     let writer_for_webrtc = writer.clone();

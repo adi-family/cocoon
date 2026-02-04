@@ -16,8 +16,9 @@
 //!
 //! If no ICE servers are configured, defaults to Google's public STUN server.
 
+use crate::adi_router::{AdiRouter, AdiRouterResult};
 use crate::filesystem::{FileSystemRequest, handle_request as handle_fs_request};
-use lib_signaling_protocol::SignalingMessage;
+use lib_signaling_protocol::{AdiDiscovery, AdiRequest, AdiResponse, SignalingMessage};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
@@ -118,6 +119,8 @@ pub struct WebRtcManager {
     signaling_tx: mpsc::UnboundedSender<SignalingMessage>,
     /// Timeout for closing peer connections (default: 5 seconds)
     close_timeout: std::time::Duration,
+    /// ADI service router for handling "adi" channel requests
+    adi_router: Option<Arc<Mutex<AdiRouter>>>,
 }
 
 impl WebRtcManager {
@@ -127,6 +130,20 @@ impl WebRtcManager {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             signaling_tx,
             close_timeout: std::time::Duration::from_secs(5),
+            adi_router: None,
+        }
+    }
+
+    /// Create a new WebRTC manager with ADI router
+    pub fn with_adi_router(
+        signaling_tx: mpsc::UnboundedSender<SignalingMessage>,
+        adi_router: Arc<Mutex<AdiRouter>>,
+    ) -> Self {
+        Self {
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            signaling_tx,
+            close_timeout: std::time::Duration::from_secs(5),
+            adi_router: Some(adi_router),
         }
     }
 
@@ -140,6 +157,7 @@ impl WebRtcManager {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             signaling_tx,
             close_timeout,
+            adi_router: None,
         }
     }
 
@@ -299,11 +317,13 @@ impl WebRtcManager {
         let session_id_clone = session_id.clone();
         let signaling_tx_clone = self.signaling_tx.clone();
         let sessions_clone = self.sessions.clone();
+        let adi_router_clone = self.adi_router.clone();
         peer_connection.on_data_channel(Box::new(move |dc| {
             let session_id = session_id_clone.clone();
             let tx = signaling_tx_clone.clone();
             let sessions = sessions_clone.clone();
             let dc_label = dc.label().to_string();
+            let adi_router = adi_router_clone.clone();
 
             Box::pin(async move {
                 tracing::info!(
@@ -322,11 +342,13 @@ impl WebRtcManager {
                 let session_id_clone = session_id.clone();
                 let tx_clone = tx.clone();
                 let dc_clone = dc.clone();
+                let adi_router_for_msg = adi_router.clone();
                 dc.on_message(Box::new(move |msg: DataChannelMessage| {
                     let session_id = session_id_clone.clone();
                     let channel = dc_label_clone.clone();
                     let tx = tx_clone.clone();
                     let dc_for_response = dc_clone.clone();
+                    let adi_router = adi_router_for_msg.clone();
 
                     Box::pin(async move {
                         let (data, binary) = if msg.is_string {
@@ -373,6 +395,106 @@ impl WebRtcManager {
                                     if let Ok(error_json) = serde_json::to_string(&error_response) {
                                         let _ = dc_for_response.send(&error_json.into_bytes().into()).await;
                                     }
+                                }
+                            }
+                            return;
+                        }
+
+                        // Handle "adi" channel for ADI service requests
+                        if channel == "adi" {
+                            if let Some(router) = &adi_router {
+                                tracing::debug!("📦 ADI request received: {} bytes", data.len());
+                                
+                                // Try to parse as discovery request first
+                                if let Ok(discovery) = serde_json::from_str::<AdiDiscovery>(&data) {
+                                    let router_guard = router.lock().await;
+                                    let response = router_guard.handle_discovery(discovery);
+                                    drop(router_guard);
+                                    
+                                    if let Ok(response_json) = serde_json::to_string(&response) {
+                                        if let Err(e) = dc_for_response.send(&response_json.into_bytes().into()).await {
+                                            tracing::error!("❌ Failed to send ADI discovery response: {}", e);
+                                        }
+                                    }
+                                    return;
+                                }
+                                
+                                // Parse as service request
+                                match serde_json::from_str::<AdiRequest>(&data) {
+                                    Ok(request) => {
+                                        let router_guard = router.lock().await;
+                                        let result = router_guard.handle(request).await;
+                                        drop(router_guard);
+                                        
+                                        match result {
+                                            AdiRouterResult::Single(response) => {
+                                                if let Ok(response_json) = serde_json::to_string(&response) {
+                                                    let response_len = response_json.len();
+                                                    if let Err(e) = dc_for_response.send(&response_json.into_bytes().into()).await {
+                                                        tracing::error!("❌ Failed to send ADI response: {}", e);
+                                                    } else {
+                                                        tracing::debug!("📤 ADI response sent: {} bytes", response_len);
+                                                    }
+                                                }
+                                            }
+                                            AdiRouterResult::Stream { request_id, service, method, mut receiver } => {
+                                                // Handle streaming response
+                                                let dc_for_stream = dc_for_response.clone();
+                                                tokio::spawn(async move {
+                                                    let mut seq = 0u32;
+                                                    while let Some((chunk_data, done)) = receiver.recv().await {
+                                                        let response = AdiResponse::Stream {
+                                                            request_id,
+                                                            service: service.clone(),
+                                                            method: method.clone(),
+                                                            data: chunk_data,
+                                                            seq,
+                                                            done,
+                                                        };
+                                                        seq += 1;
+                                                        
+                                                        if let Ok(response_json) = serde_json::to_string(&response) {
+                                                            if let Err(e) = dc_for_stream.send(&response_json.into_bytes().into()).await {
+                                                                tracing::error!("❌ Failed to send ADI stream chunk: {}", e);
+                                                                break;
+                                                            }
+                                                        }
+                                                        
+                                                        if done {
+                                                            break;
+                                                        }
+                                                    }
+                                                });
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("⚠️ Invalid ADI request: {}", e);
+                                        let error_response = serde_json::json!({
+                                            "type": "error",
+                                            "request_id": null,
+                                            "service": "",
+                                            "method": "",
+                                            "code": "invalid_request",
+                                            "message": format!("Failed to parse request: {}", e)
+                                        });
+                                        if let Ok(error_json) = serde_json::to_string(&error_response) {
+                                            let _ = dc_for_response.send(&error_json.into_bytes().into()).await;
+                                        }
+                                    }
+                                }
+                            } else {
+                                tracing::warn!("⚠️ ADI request received but no router configured");
+                                let error_response = serde_json::json!({
+                                    "type": "error",
+                                    "request_id": null,
+                                    "service": "",
+                                    "method": "",
+                                    "code": "no_router",
+                                    "message": "ADI service router not configured"
+                                });
+                                if let Ok(error_json) = serde_json::to_string(&error_response) {
+                                    let _ = dc_for_response.send(&error_json.into_bytes().into()).await;
                                 }
                             }
                             return;
