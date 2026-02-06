@@ -63,3 +63,24 @@ tempfile = "3"
 opt-level = "z"
 lto = true
 strip = true
+
+[package.metadata.plugin]
+id = "adi.cocoon"
+name = "Cocoon"
+type = "core"
+
+[package.metadata.plugin.compatibility]
+min_host_version = "0.8.0"
+
+[package.metadata.plugin.cli]
+command = "cocoon"
+description = "Containerized worker for remote command execution"
+aliases = []
+
+[[package.metadata.plugin.provides]]
+id = "adi.cocoon.cli"
+version = "1.0.0"
+description = "CLI commands for cocoon management"
+
+[package.metadata.plugin.tags]
+categories = ["remote", "execution", "terminal", "pty"]

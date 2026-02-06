@@ -11,7 +11,6 @@ COPY crates/lib/lib-plugin-abi ./lib-plugin-abi
 # Copy cocoon source
 COPY crates/cocoon/Cargo.toml ./Cargo.toml
 COPY crates/cocoon/src ./src
-COPY crates/cocoon/plugin.toml ./plugin.toml
 
 # Fix path dependencies to use local paths
 RUN sed -i 's|path = "../lib/lib-tarminal-sync"|path = "./lib-tarminal-sync"|g' Cargo.toml && \
