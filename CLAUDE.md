@@ -674,7 +674,7 @@ version: '3.8'
 services:
   # Signaling server
   signaling:
-    image: ghcr.io/adi-family/tarminal-signaling-server:latest
+    image: ghcr.io/adi-family/signaling-server:latest
     ports:
       - "8080:8080"
     environment:
@@ -734,7 +734,7 @@ Server rejects with: "Registration rejected - device_id does not match secret. P
 
 1. Start signaling server:
 ```bash
-cd crates/tarminal-signaling-server
+cd crates/signaling-server
 cargo run
 ```
 
