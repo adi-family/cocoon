@@ -13,7 +13,7 @@
 use crate::adi_router::{
     AdiHandleResult, AdiService, AdiServiceError, SubscriptionEvent, SubscriptionEventInfo,
 };
-use adi_tasks_core::{CreateTask, Task, TaskId, TaskManager, TaskStatus};
+use tasks_core::{CreateTask, Task, TaskId, TaskManager, TaskStatus};
 use async_trait::async_trait;
 use lib_signaling_protocol::{AdiMethodInfo, AdiServiceCapabilities};
 use serde_json::{json, Value as JsonValue};
