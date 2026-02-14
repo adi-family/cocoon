@@ -26,6 +26,9 @@ lib-plugin-abi-v3 = { path = "../lib/lib-plugin-abi-v3" }
 # Interactive CLI
 inquire = "0.7"
 
+# Environment
+lib-env-parse = { path = "../lib/lib-env-parse" }
+
 # Core dependencies
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "fs", "process", "io-util", "sync", "signal"] }
 tokio-tungstenite = "0.24"

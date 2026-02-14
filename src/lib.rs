@@ -22,6 +22,15 @@ pub use webrtc::WebRtcManager;
 pub use services::TasksService;
 
 use base64::Engine;
+use lib_env_parse::{env_vars, env_opt};
+
+env_vars! {
+    SignalingServerUrl => "SIGNALING_SERVER_URL",
+    Home => "HOME",
+    CocoonSetupToken => "COCOON_SETUP_TOKEN",
+    CocoonSecret => "COCOON_SECRET",
+}
+
 use lib_plugin_abi_v3::{
     async_trait,
     cli::{CliCommand, CliCommands, CliContext, CliResult},
@@ -63,11 +72,11 @@ pub fn service_install() -> Result<String, String> {
 }
 
 fn install_systemd_service() -> Result<String, String> {
-    let signaling_url = std::env::var("SIGNALING_SERVER_URL")
-        .unwrap_or_else(|_| "ws://localhost:8080/ws".to_string());
+    let signaling_url = env_opt(EnvVar::SignalingServerUrl.as_str())
+        .unwrap_or_else(|| "ws://localhost:8080/ws".to_string());
 
     let home_dir =
-        std::env::var("HOME").map_err(|_| "HOME environment variable not set".to_string())?;
+        env_opt(EnvVar::Home.as_str()).ok_or_else(|| "HOME environment variable not set".to_string())?;
 
     let service_dir = format!("{}/.config/systemd/user", home_dir);
     let service_file = format!("{}/cocoon.service", service_dir);
@@ -100,7 +109,7 @@ fn install_systemd_service() -> Result<String, String> {
         new_secret
     };
 
-    let setup_token = std::env::var("COCOON_SETUP_TOKEN").ok();
+    let setup_token = env_opt(EnvVar::CocoonSetupToken.as_str());
     let binary_path = get_binary_path()?;
 
     let mut service_content = format!(
@@ -153,11 +162,11 @@ WantedBy=default.target
 }
 
 fn install_launchd_service() -> Result<String, String> {
-    let signaling_url = std::env::var("SIGNALING_SERVER_URL")
-        .unwrap_or_else(|_| "ws://localhost:8080/ws".to_string());
+    let signaling_url = env_opt(EnvVar::SignalingServerUrl.as_str())
+        .unwrap_or_else(|| "ws://localhost:8080/ws".to_string());
 
     let home_dir =
-        std::env::var("HOME").map_err(|_| "HOME environment variable not set".to_string())?;
+        env_opt(EnvVar::Home.as_str()).ok_or_else(|| "HOME environment variable not set".to_string())?;
 
     let plist_dir = format!("{}/Library/LaunchAgents", home_dir);
     let plist_file = format!("{}/com.adi.cocoon.plist", plist_dir);
@@ -182,7 +191,7 @@ fn install_launchd_service() -> Result<String, String> {
         new_secret
     };
 
-    let setup_token = std::env::var("COCOON_SETUP_TOKEN").ok();
+    let setup_token = env_opt(EnvVar::CocoonSetupToken.as_str());
     let binary_path = get_binary_path()?;
 
     let mut plist_content = format!(
@@ -767,7 +776,7 @@ impl CliCommands for CocoonPlugin {
                                 .position(|arg| arg == "--url")
                                 .and_then(|idx| args.get(idx + 1))
                                 .map(|s| s.to_string())
-                                .or_else(|| std::env::var("SIGNALING_SERVER_URL").ok())
+                                .or_else(|| env_opt(EnvVar::SignalingServerUrl.as_str()))
                                 .unwrap_or_else(|| "ws://localhost:8080/ws".to_string());
 
                             let setup_token = args
@@ -775,14 +784,14 @@ impl CliCommands for CocoonPlugin {
                                 .position(|arg| arg == "--token")
                                 .and_then(|idx| args.get(idx + 1))
                                 .map(|s| s.to_string())
-                                .or_else(|| std::env::var("COCOON_SETUP_TOKEN").ok());
+                                .or_else(|| env_opt(EnvVar::CocoonSetupToken.as_str()));
 
                             let cocoon_secret = args
                                 .iter()
                                 .position(|arg| arg == "--secret")
                                 .and_then(|idx| args.get(idx + 1))
                                 .map(|s| s.to_string())
-                                .or_else(|| std::env::var("COCOON_SECRET").ok());
+                                .or_else(|| env_opt(EnvVar::CocoonSecret.as_str()));
 
                             create_docker_cocoon(
                                 &name,

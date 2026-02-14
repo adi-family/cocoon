@@ -9,6 +9,13 @@ use std::collections::HashMap;
 use std::process::{Child, Command, Stdio};
 use uuid::Uuid;
 
+use lib_env_parse::{env_vars, env_opt};
+
+env_vars! {
+    Shell => "SHELL",
+    Home => "HOME",
+}
+
 /// Known interactive commands that always need a PTY
 const INTERACTIVE_COMMANDS: &[&str] = &[
     "vim",
@@ -69,12 +76,12 @@ impl SilkSession {
     ) -> Result<Self, String> {
         // Determine shell to use
         let shell = shell
-            .or_else(|| std::env::var("SHELL").ok())
+            .or_else(|| env_opt(EnvVar::Shell.as_str()))
             .unwrap_or_else(|| "/bin/sh".to_string());
 
         // Determine working directory
         let cwd = cwd
-            .or_else(|| std::env::var("HOME").ok())
+            .or_else(|| env_opt(EnvVar::Home.as_str()))
             .unwrap_or_else(|| "/".to_string());
 
         // Verify shell exists
@@ -178,7 +185,7 @@ impl SilkSession {
             let path = trimmed.strip_prefix("cd ").unwrap().trim();
             // Handle ~ expansion
             let path = if path.starts_with('~') {
-                if let Ok(home) = std::env::var("HOME") {
+                if let Some(home) = env_opt(EnvVar::Home.as_str()) {
                     path.replacen('~', &home, 1)
                 } else {
                     path.to_string()

@@ -15,6 +15,15 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::{broadcast, Mutex};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use uuid::Uuid;
+use lib_env_parse::{env_vars, env_opt, env_or};
+
+env_vars! {
+    CocoonSecret => "COCOON_SECRET",
+    SignalingServerUrl => "SIGNALING_SERVER_URL",
+    CocoonServices => "COCOON_SERVICES",
+    CocoonSetupToken => "COCOON_SETUP_TOKEN",
+    CocoonName => "COCOON_NAME",
+}
 
 const OUTPUT_DIR: &str = "/cocoon/output";
 const RESPONSE_PATH: &str = "/cocoon/output/response.json";
@@ -699,7 +708,7 @@ async fn get_or_create_secret() -> (String, Option<String>) {
     let device_id = load_device_id().await;
 
     // Try environment variable first (for manual management)
-    if let Ok(secret) = std::env::var("COCOON_SECRET") {
+    if let Some(secret) = env_opt(EnvVar::CocoonSecret.as_str()) {
         tracing::info!("📋 Using secret from COCOON_SECRET environment variable");
 
         // Validate manual secret
@@ -778,8 +787,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Get or create client secret and load device ID (for reconnection verification)
     let (secret, device_id) = get_or_create_secret().await;
 
-    let signaling_url = std::env::var("SIGNALING_SERVER_URL")
-        .unwrap_or_else(|_| "ws://localhost:8080/ws".to_string());
+    let signaling_url = env_or(EnvVar::SignalingServerUrl.as_str(), "ws://localhost:8080/ws");
 
     tracing::info!("🔗 Connecting to signaling server: {}", signaling_url);
 
@@ -855,7 +863,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Format: "service1:port1,service2:port2"
     // Example: "flowmap-api:8092,postgres:5432"
     let mut services = HashMap::new();
-    if let Ok(services_str) = std::env::var("COCOON_SERVICES") {
+    if let Some(services_str) = env_opt(EnvVar::CocoonServices.as_str()) {
         for service_def in services_str.split(',') {
             let parts: Vec<&str> = service_def.trim().split(':').collect();
             if parts.len() == 2 {
@@ -873,8 +881,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let services = Arc::new(services);
 
     // Check for setup token (one-command install flow)
-    let setup_token = std::env::var("COCOON_SETUP_TOKEN").ok();
-    let cocoon_name = std::env::var("COCOON_NAME").ok();
+    let setup_token = env_opt(EnvVar::CocoonSetupToken.as_str());
+    let cocoon_name = env_opt(EnvVar::CocoonName.as_str());
 
     // Register with signaling server
     // If setup token provided: use RegisterWithSetupToken (auto-claims ownership)

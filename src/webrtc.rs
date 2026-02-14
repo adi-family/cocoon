@@ -35,6 +35,14 @@ use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 
+use lib_env_parse::{env_vars, env_opt};
+
+env_vars! {
+    WebrtcIceServers => "WEBRTC_ICE_SERVERS",
+    WebrtcTurnUsername => "WEBRTC_TURN_USERNAME",
+    WebrtcTurnCredential => "WEBRTC_TURN_CREDENTIAL",
+}
+
 /// Build ICE server configuration from environment variables
 ///
 /// Environment variables:
@@ -42,9 +50,9 @@ use webrtc::peer_connection::RTCPeerConnection;
 /// - `WEBRTC_TURN_USERNAME`: Username for TURN authentication
 /// - `WEBRTC_TURN_CREDENTIAL`: Credential for TURN authentication
 fn build_ice_servers() -> Vec<RTCIceServer> {
-    let ice_servers_env = std::env::var("WEBRTC_ICE_SERVERS").ok();
-    let turn_username = std::env::var("WEBRTC_TURN_USERNAME").ok();
-    let turn_credential = std::env::var("WEBRTC_TURN_CREDENTIAL").ok();
+    let ice_servers_env = env_opt(EnvVar::WebrtcIceServers.as_str());
+    let turn_username = env_opt(EnvVar::WebrtcTurnUsername.as_str());
+    let turn_credential = env_opt(EnvVar::WebrtcTurnCredential.as_str());
 
     let urls: Vec<String> = ice_servers_env
         .as_ref()

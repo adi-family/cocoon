@@ -7,6 +7,12 @@
 use semver::Version;
 use std::path::PathBuf;
 
+use lib_env_parse::{env_vars, env_opt};
+
+env_vars! {
+    Home => "HOME",
+}
+
 const REPO_OWNER: &str = "adi-family";
 const REPO_NAME: &str = "cocoon";
 const DOCKER_IMAGE: &str = "docker-registry.the-ihor.com/cocoon";
@@ -363,7 +369,7 @@ pub mod machine {
         }
 
         // Fallback to ~/.local/bin
-        let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+        let home = env_opt(EnvVar::Home.as_str()).ok_or_else(|| "HOME not set".to_string())?;
         Ok(PathBuf::from(format!("{}/.local/bin", home)))
     }
 
@@ -414,7 +420,7 @@ pub mod machine {
                 }
             }
             "macos" => {
-                let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+                let home = env_opt(EnvVar::Home.as_str()).ok_or_else(|| "HOME not set".to_string())?;
                 let plist = format!("{}/Library/LaunchAgents/com.adi.cocoon.plist", home);
 
                 if Path::new(&plist).exists() {

@@ -5,6 +5,12 @@
 use crate::self_update;
 use std::fmt;
 
+use lib_env_parse::{env_vars, env_opt};
+
+env_vars! {
+    Home => "HOME",
+}
+
 /// Runtime type for a cocoon instance
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeType {
@@ -430,12 +436,12 @@ impl MachineRuntime {
         let os = Self::detect_os();
         match os {
             "linux" => {
-                let home = std::env::var("HOME").unwrap_or_default();
+                let home = env_opt(EnvVar::Home.as_str()).unwrap_or_default();
                 std::path::Path::new(&format!("{}/.config/systemd/user/cocoon.service", home))
                     .exists()
             }
             "macos" => {
-                let home = std::env::var("HOME").unwrap_or_default();
+                let home = env_opt(EnvVar::Home.as_str()).unwrap_or_default();
                 std::path::Path::new(&format!(
                     "{}/Library/LaunchAgents/com.adi.cocoon.plist",
                     home
@@ -499,7 +505,7 @@ impl Runtime for MachineRuntime {
                 }
             }
             "macos" => {
-                let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+                let home = env_opt(EnvVar::Home.as_str()).ok_or_else(|| "HOME not set".to_string())?;
                 let plist = format!("{}/Library/LaunchAgents/com.adi.cocoon.plist", home);
 
                 let output = std::process::Command::new("launchctl")
@@ -536,7 +542,7 @@ impl Runtime for MachineRuntime {
                 }
             }
             "macos" => {
-                let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+                let home = env_opt(EnvVar::Home.as_str()).ok_or_else(|| "HOME not set".to_string())?;
                 let plist = format!("{}/Library/LaunchAgents/com.adi.cocoon.plist", home);
 
                 let output = std::process::Command::new("launchctl")
@@ -611,7 +617,7 @@ impl Runtime for MachineRuntime {
 
         match os {
             "linux" => {
-                let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+                let home = env_opt(EnvVar::Home.as_str()).ok_or_else(|| "HOME not set".to_string())?;
                 let service_file = format!("{}/.config/systemd/user/cocoon.service", home);
 
                 std::process::Command::new("systemctl")
@@ -632,7 +638,7 @@ impl Runtime for MachineRuntime {
                 Ok("Service uninstalled".to_string())
             }
             "macos" => {
-                let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+                let home = env_opt(EnvVar::Home.as_str()).ok_or_else(|| "HOME not set".to_string())?;
                 let plist = format!("{}/Library/LaunchAgents/com.adi.cocoon.plist", home);
 
                 if std::path::Path::new(&plist).exists() {
