@@ -9,6 +9,7 @@ mod interactive;
 mod runtime;
 mod self_update;
 pub mod services;
+mod setup;
 pub mod silk;
 pub mod webrtc;
 
@@ -376,6 +377,7 @@ COMMANDS:
     rm <name> [--force] Remove a cocoon
     create              Create a new cocoon (interactive)
     run                 Run cocoon natively in foreground
+    setup [--port PORT] Start pairing server for browser setup (default: 14730)
     check-update [name] Check for available updates
     update [name]       Update cocoon to latest version
     version             Show current version
@@ -539,6 +541,12 @@ impl CliCommands for CocoonPlugin {
                 name: "run".to_string(),
                 description: "Run cocoon natively in foreground".to_string(),
                 usage: "run".to_string(),
+                has_subcommands: false,
+            },
+            CliCommand {
+                name: "setup".to_string(),
+                description: "Start pairing server for browser setup".to_string(),
+                usage: "setup [--port PORT]".to_string(),
                 has_subcommands: false,
             },
             CliCommand {
@@ -848,6 +856,27 @@ impl CliCommands for CocoonPlugin {
                 });
 
                 Ok("Cocoon stopped".to_string())
+            }
+
+            // Browser pairing setup
+            "setup" => {
+                let port = args
+                    .iter()
+                    .position(|arg| arg == "--port" || arg == "-p")
+                    .and_then(|idx| args.get(idx + 1))
+                    .and_then(|s| s.parse::<u16>().ok())
+                    .unwrap_or(14730);
+
+                let rt = match tokio::runtime::Runtime::new() {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        return Ok(CliResult::error(format!("Failed to create runtime: {}", e)));
+                    }
+                };
+
+                rt.block_on(async {
+                    setup::run_setup(port).await
+                })
             }
 
             // Check for updates
