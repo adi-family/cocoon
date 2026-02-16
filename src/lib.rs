@@ -57,8 +57,8 @@ fn get_binary_path() -> Result<std::path::PathBuf, String> {
 
 fn generate_secret() -> String {
     use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let bytes: Vec<u8> = (0..36).map(|_| rng.gen()).collect();
+    let mut rng = rand::rng();
+    let bytes: Vec<u8> = (0..36).map(|_| rng.random()).collect();
     base64::engine::general_purpose::STANDARD.encode(&bytes)
 }
 
