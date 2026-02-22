@@ -1026,6 +1026,8 @@ impl CliCommands for CocoonPlugin {
     }
 }
 
+lib_plugin_abi_v3::export_abi_version!();
+
 /// Create the plugin instance (v3 entry point)
 #[no_mangle]
 pub fn plugin_create() -> Box<dyn Plugin> {
