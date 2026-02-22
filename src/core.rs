@@ -376,7 +376,8 @@ async fn create_pty_session(
                     };
 
                     let msg = SignalingMessage::SyncData {
-                        payload: serde_json::to_value(&response).unwrap(),
+                        payload: serde_json::to_value(&response)
+                            .expect("CommandResponse serialization cannot fail"),
                     };
 
                     // Send output to client (non-blocking)
@@ -384,7 +385,10 @@ async fn create_pty_session(
                     tokio::spawn(async move {
                         let mut w = writer_clone.lock().await;
                         let _ = w
-                            .send(Message::Text(serde_json::to_string(&msg).unwrap()))
+                            .send(Message::Text(
+                                serde_json::to_string(&msg)
+                                    .expect("SignalingMessage serialization cannot fail"),
+                            ))
                             .await;
                     });
                 }
@@ -623,7 +627,7 @@ fn validate_secret(secret: &str) -> Result<(), String> {
         return Err("Secret must not be only lowercase letters".to_string());
     }
 
-    if secret.chars().all(|c| c == secret.chars().next().unwrap()) {
+    if secret.chars().all(|c| Some(c) == secret.chars().next()) {
         return Err("Secret must not be repetitive characters".to_string());
     }
 
@@ -691,7 +695,8 @@ async fn send_deregister(writer: &SharedWriter, device_id: &str, reason: Option<
     let mut w = writer.lock().await;
     if let Err(e) = w
         .send(Message::Text(
-            serde_json::to_string(&deregister_msg).unwrap(),
+            serde_json::to_string(&deregister_msg)
+                .expect("SignalingMessage serialization cannot fail"),
         ))
         .await
     {
@@ -703,7 +708,7 @@ async fn send_deregister(writer: &SharedWriter, device_id: &str, reason: Option<
 
 /// Load or generate client secret for persistent device ID
 /// Returns (secret, optional_device_id)
-async fn get_or_create_secret() -> (String, Option<String>) {
+async fn get_or_create_secret() -> Result<(String, Option<String>), Box<dyn std::error::Error>> {
     // Load device_id if it exists (for reconnection verification)
     let device_id = load_device_id().await;
 
@@ -719,10 +724,10 @@ async fn get_or_create_secret() -> (String, Option<String>) {
             tracing::error!("   - Must be random and unpredictable");
             tracing::error!("   - Avoid common patterns, dictionary words");
             tracing::error!("   - Use: openssl rand -base64 36");
-            std::process::exit(1);
+            return Err(format!("Invalid COCOON_SECRET: {}", e).into());
         }
 
-        return (secret, device_id);
+        return Ok((secret, device_id));
     }
 
     // Try loading from file
@@ -740,7 +745,7 @@ async fn get_or_create_secret() -> (String, Option<String>) {
                 // Fall through to generate new secret
             } else {
                 tracing::info!("🔑 Loaded existing secret from {}", SECRET_PATH);
-                return (secret, device_id);
+                return Ok((secret, device_id));
             }
         }
         Err(_) => {
@@ -771,21 +776,21 @@ async fn get_or_create_secret() -> (String, Option<String>) {
     }
 
     // New secret means no device_id yet (first registration)
-    (secret, None)
+    Ok((secret, None))
 }
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("cocoon=info".parse().unwrap()),
+                .add_directive("cocoon=info".parse().expect("valid tracing directive")),
         )
         .init();
 
     tracing::info!("🐛 Cocoon starting (v{})", env!("CARGO_PKG_VERSION"));
 
     // Get or create client secret and load device ID (for reconnection verification)
-    let (secret, device_id) = get_or_create_secret().await;
+    let (secret, device_id) = get_or_create_secret().await?;
 
     let signaling_url = env_or(EnvVar::SignalingServerUrl.as_str(), "ws://localhost:8080/ws");
 
@@ -795,7 +800,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Ok(conn) => conn,
         Err(e) => {
             tracing::error!("❌ Failed to connect to signaling server: {}", e);
-            std::process::exit(1);
+            return Err(format!("Failed to connect to signaling server: {}", e).into());
         }
     };
 
@@ -851,7 +856,9 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         while let Some(msg) = webrtc_rx.recv().await {
             let mut w = writer_for_webrtc.lock().await;
             if let Err(e) = w
-                .send(Message::Text(serde_json::to_string(&msg).unwrap_or_default()))
+                .send(Message::Text(
+                    serde_json::to_string(&msg).unwrap_or_default(),
+                ))
                 .await
             {
                 tracing::warn!("⚠️ Failed to send WebRTC signaling message: {}", e);
@@ -908,11 +915,14 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     {
         let mut w = writer.lock().await;
         if let Err(e) = w
-            .send(Message::Text(serde_json::to_string(&register_msg).unwrap()))
+            .send(Message::Text(
+                serde_json::to_string(&register_msg)
+                    .expect("SignalingMessage serialization cannot fail"),
+            ))
             .await
         {
             tracing::error!("❌ Failed to register: {}", e);
-            std::process::exit(1);
+            return Err(format!("Failed to send registration message: {}", e).into());
         }
     }
 
@@ -1333,12 +1343,14 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                                                 payload: serde_json::to_value(
                                                     &CommandResponse::SilkResponse(started),
                                                 )
-                                                .unwrap(),
+                                                .expect("CommandResponse serialization cannot fail"),
                                             };
                                             let mut w = writer_clone.lock().await;
                                             let _ = w
                                                 .send(Message::Text(
-                                                    serde_json::to_string(&started_msg).unwrap(),
+                                                    serde_json::to_string(&started_msg).expect(
+                                                        "SignalingMessage serialization cannot fail",
+                                                    ),
                                                 ))
                                                 .await;
                                             drop(w);
@@ -1346,10 +1358,10 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                                             // Spawn task to read output
                                             tokio::spawn(async move {
                                                 let mut stdout_reader = std::io::BufReader::new(
-                                                    child.stdout.take().unwrap(),
+                                                    child.stdout.take().expect("child stdout is piped"),
                                                 );
                                                 let mut stderr_reader = std::io::BufReader::new(
-                                                    child.stderr.take().unwrap(),
+                                                    child.stderr.take().expect("child stderr is piped"),
                                                 );
 
                                                 // Read stdout in chunks
@@ -1375,14 +1387,14 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                                                                         output,
                                                                     ),
                                                                 )
-                                                                .unwrap(),
+                                                                .expect("CommandResponse serialization cannot fail"),
                                                             };
                                                             let mut w =
                                                                 writer_for_output.lock().await;
                                                             let _ = w
                                                                 .send(Message::Text(
                                                                     serde_json::to_string(&msg)
-                                                                        .unwrap(),
+                                                                        .expect("SignalingMessage serialization cannot fail"),
                                                                 ))
                                                                 .await;
                                                         }
@@ -1408,12 +1420,14 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                                                         payload: serde_json::to_value(
                                                             &CommandResponse::SilkResponse(output),
                                                         )
-                                                        .unwrap(),
+                                                        .expect("CommandResponse serialization cannot fail"),
                                                     };
                                                     let mut w = writer_for_output.lock().await;
                                                     let _ = w
                                                         .send(Message::Text(
-                                                            serde_json::to_string(&msg).unwrap(),
+                                                            serde_json::to_string(&msg).expect(
+                                                                "SignalingMessage serialization cannot fail",
+                                                            ),
                                                         ))
                                                         .await;
                                                 }
@@ -1445,13 +1459,14 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                                                                     completed,
                                                                 ),
                                                             )
-                                                            .unwrap(),
+                                                            .expect("CommandResponse serialization cannot fail"),
                                                         };
                                                         let mut w = writer_for_output.lock().await;
                                                         let _ = w
                                                             .send(Message::Text(
-                                                                serde_json::to_string(&msg)
-                                                                    .unwrap(),
+                                                                serde_json::to_string(&msg).expect(
+                                                                    "SignalingMessage serialization cannot fail",
+                                                                ),
                                                             ))
                                                             .await;
                                                     }
@@ -1620,12 +1635,16 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 // Send response (if any)
                                 if let Some(response) = response {
                                     let response_msg = SignalingMessage::SyncData {
-                                        payload: serde_json::to_value(&response).unwrap(),
+                                        payload: serde_json::to_value(&response)
+                                            .expect("CommandResponse serialization cannot fail"),
                                     };
 
                                     let mut w = writer_clone.lock().await;
                                     if let Err(e) = w
-                                        .send(Message::Text(serde_json::to_string(&response_msg).unwrap()))
+                                        .send(Message::Text(
+                                            serde_json::to_string(&response_msg)
+                                                .expect("SignalingMessage serialization cannot fail"),
+                                        ))
                                         .await
                                     {
                                         tracing::error!("❌ Failed to send response: {}", e);
@@ -1670,7 +1689,12 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     message: e,
                                 };
                                 let mut w = writer.lock().await;
-                                let _ = w.send(Message::Text(serde_json::to_string(&error_msg).unwrap())).await;
+                                let _ = w
+                                    .send(Message::Text(
+                                        serde_json::to_string(&error_msg)
+                                            .expect("SignalingMessage serialization cannot fail"),
+                                    ))
+                                    .await;
                             }
                         }
                     }
@@ -1680,7 +1704,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         let webrtc = webrtc_manager.clone();
                         let writer_clone = writer.clone();
                         let session_id_clone = session_id.clone();
-                        
+
                         tokio::spawn(async move {
                             match webrtc.handle_offer(&session_id_clone, &sdp).await {
                                 Ok(answer_sdp) => {
@@ -1690,7 +1714,13 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         sdp: answer_sdp,
                                     };
                                     let mut w = writer_clone.lock().await;
-                                    let _ = w.send(Message::Text(serde_json::to_string(&answer_msg).unwrap())).await;
+                                    let _ = w
+                                        .send(Message::Text(
+                                            serde_json::to_string(&answer_msg).expect(
+                                                "SignalingMessage serialization cannot fail",
+                                            ),
+                                        ))
+                                        .await;
                                 }
                                 Err(e) => {
                                     tracing::error!("❌ Failed to handle WebRTC offer: {}", e);
@@ -1700,7 +1730,13 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         message: e,
                                     };
                                     let mut w = writer_clone.lock().await;
-                                    let _ = w.send(Message::Text(serde_json::to_string(&error_msg).unwrap())).await;
+                                    let _ = w
+                                        .send(Message::Text(
+                                            serde_json::to_string(&error_msg).expect(
+                                                "SignalingMessage serialization cannot fail",
+                                            ),
+                                        ))
+                                        .await;
                                 }
                             }
                         });
