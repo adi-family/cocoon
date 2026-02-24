@@ -13,7 +13,9 @@ mod setup;
 pub mod silk;
 pub mod webrtc;
 
-pub use adi_router::{AdiHandleResult, AdiRouter, AdiService, AdiServiceError, create_stream_channel, StreamSender};
+pub use adi_router::{
+    create_stream_channel, AdiHandleResult, AdiRouter, AdiService, AdiServiceError, StreamSender,
+};
 pub use core::run;
 pub use runtime::{CocoonInfo, CocoonStatus, Runtime, RuntimeManager, RuntimeType};
 pub use silk::{AnsiToHtml, SilkSession};
@@ -23,7 +25,8 @@ pub use webrtc::WebRtcManager;
 pub use services::TasksService;
 
 use base64::Engine;
-use lib_env_parse::{env_vars, env_opt};
+use lib_console_output::{out_error, out_info, out_success, out_warn, theme, KeyValue, Renderable};
+use lib_env_parse::{env_opt, env_vars};
 
 env_vars! {
     SignalingServerUrl => "SIGNALING_SERVER_URL",
@@ -119,13 +122,13 @@ fn generate_secret() -> String {
 }
 
 pub fn service_install() -> std::result::Result<String, String> {
-    use lib_daemon_core::{get_service_manager, ServiceConfig, RestartPolicy};
+    use lib_daemon_core::{get_service_manager, RestartPolicy, ServiceConfig};
 
     let signaling_url = env_opt(EnvVar::SignalingServerUrl.as_str())
-        .unwrap_or_else(|| "ws://localhost:8080/ws".to_string());
+        .ok_or_else(|| "SIGNALING_SERVER_URL environment variable not set".to_string())?;
 
-    let home_dir =
-        env_opt(EnvVar::Home.as_str()).ok_or_else(|| "HOME environment variable not set".to_string())?;
+    let home_dir = env_opt(EnvVar::Home.as_str())
+        .ok_or_else(|| "HOME environment variable not set".to_string())?;
 
     let config_dir = format!("{}/.config/cocoon", home_dir);
     std::fs::create_dir_all(&config_dir)
@@ -264,16 +267,16 @@ fn create_docker_cocoon(
 
     docker_cmd.arg("docker-registry.the-ihor.com/cocoon:latest");
 
-    println!("Creating Docker cocoon '{}'...", name);
+    out_info!("Creating Docker cocoon '{}'...", name);
 
     match docker_cmd.output() {
         Ok(output) if output.status.success() => {
             let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            println!("Container created: {}", container_id);
-            println!("\nManage cocoon:");
-            println!("  adi cocoon status {}", name);
-            println!("  adi cocoon logs {} -f", name);
-            println!("  adi cocoon stop {}", name);
+            out_success!("Container created: {}", container_id);
+            out_info!("Manage cocoon:");
+            out_info!("  adi cocoon status {}", name);
+            out_info!("  adi cocoon logs {} -f", name);
+            out_info!("  adi cocoon stop {}", name);
             Ok(format!("Container '{}' created: {}", name, container_id))
         }
         Ok(output) => {
@@ -477,22 +480,25 @@ impl CocoonPlugin {
                     let runtime = manager.get_runtime(runtime_type);
                     match runtime.status(&name) {
                         Ok(info) => {
-                            let reset = "\x1b[0m";
-                            println!("\nCocoon: {}", info.name);
-                            println!("Runtime: {}", info.runtime);
-                            println!(
-                                "Status: {}{}{}{}",
-                                info.status_color(),
-                                info.status_icon(),
-                                info.status,
-                                reset
-                            );
+                            let status_str = format!("{} {}", info.status_icon(), info.status);
+                            let styled_status = match &info.status {
+                                CocoonStatus::Running => theme::success(&status_str).to_string(),
+                                CocoonStatus::Stopped => theme::muted(&status_str).to_string(),
+                                CocoonStatus::Restarting => theme::warning(&status_str).to_string(),
+                                CocoonStatus::Unknown(_) => theme::error(&status_str).to_string(),
+                            };
+                            let mut kv = KeyValue::new()
+                                .entry("Cocoon", &info.name)
+                                .entry("Runtime", info.runtime.to_string())
+                                .entry("Status", styled_status);
                             if let Some(image) = &info.image {
-                                println!("Image: {}", image);
+                                kv = kv.entry("Image", image);
                             }
                             if let Some(created) = &info.created {
-                                println!("Created: {}", created);
+                                kv = kv.entry("Created", created);
                             }
+                            println!();
+                            kv.print();
                             println!();
                             Ok(format!("Status: {}", info.status))
                         }
@@ -514,7 +520,7 @@ impl CocoonPlugin {
             match manager.find_cocoon(&name) {
                 Some((_, runtime_type)) => {
                     let runtime = manager.get_runtime(runtime_type);
-                    println!("Starting '{}'...", name);
+                    out_info!("Starting '{}'...", name);
                     runtime.start(&name)
                 }
                 None => Err(format!(
@@ -535,7 +541,7 @@ impl CocoonPlugin {
             match manager.find_cocoon(&name) {
                 Some((_, runtime_type)) => {
                     let runtime = manager.get_runtime(runtime_type);
-                    println!("Stopping '{}'...", name);
+                    out_info!("Stopping '{}'...", name);
                     runtime.stop(&name)
                 }
                 None => Err(format!("Cocoon '{}' not found", name)),
@@ -553,7 +559,7 @@ impl CocoonPlugin {
             match manager.find_cocoon(&name) {
                 Some((_, runtime_type)) => {
                     let runtime = manager.get_runtime(runtime_type);
-                    println!("Restarting '{}'...", name);
+                    out_info!("Restarting '{}'...", name);
                     runtime.restart(&name)
                 }
                 None => Err(format!("Cocoon '{}' not found", name)),
@@ -589,7 +595,7 @@ impl CocoonPlugin {
             match manager.find_cocoon(&name) {
                 Some((_, runtime_type)) => {
                     let runtime = manager.get_runtime(runtime_type);
-                    println!("Removing '{}'...", name);
+                    out_info!("Removing '{}'...", name);
                     runtime.remove(&name, args.force)
                 }
                 None => Err(format!("Cocoon '{}' not found", name)),
@@ -617,10 +623,12 @@ impl CocoonPlugin {
                         .url
                         .or_else(|| env_opt(EnvVar::SignalingServerUrl.as_str()))
                         .unwrap_or_else(|| "ws://localhost:8080/ws".to_string());
-                    let setup_token =
-                        args.token.or_else(|| env_opt(EnvVar::CocoonSetupToken.as_str()));
-                    let cocoon_secret =
-                        args.secret.or_else(|| env_opt(EnvVar::CocoonSecret.as_str()));
+                    let setup_token = args
+                        .token
+                        .or_else(|| env_opt(EnvVar::CocoonSetupToken.as_str()));
+                    let cocoon_secret = args
+                        .secret
+                        .or_else(|| env_opt(EnvVar::CocoonSecret.as_str()));
                     create_docker_cocoon(
                         &name,
                         &signaling_url,
@@ -633,11 +641,11 @@ impl CocoonPlugin {
                     let _ = runtime.stop("cocoon");
                     match service_install() {
                         Ok(msg) => {
-                            println!("{}", msg);
+                            out_success!("{}", msg);
                             if args.start {
                                 match service_start() {
-                                    Ok(start_msg) => println!("{}", start_msg),
-                                    Err(e) => println!("Warning: Failed to start service: {}", e),
+                                    Ok(start_msg) => out_success!("{}", start_msg),
+                                    Err(e) => out_warn!("Failed to start service: {}", e),
                                 }
                             }
                             Ok("Machine cocoon created".to_string())
@@ -655,7 +663,7 @@ impl CocoonPlugin {
     #[command(name = "run", description = "Run cocoon natively in foreground")]
     async fn run_native(&self) -> CmdResult {
         if let Err(e) = core::run().await {
-            eprintln!("Cocoon error: {}", e);
+            out_error!("Cocoon error: {}", e);
         }
         Ok("Cocoon stopped".to_string())
     }
@@ -675,7 +683,7 @@ impl CocoonPlugin {
                     let runtime = manager.get_runtime(runtime_type);
                     match runtime.check_update(&name) {
                         Ok(msg) => {
-                            println!("{}", msg);
+                            print!("{}", msg);
                             Ok(msg)
                         }
                         Err(e) => Err(e),
@@ -689,21 +697,21 @@ impl CocoonPlugin {
         } else {
             match manager.list_all() {
                 Ok(cocoons) if cocoons.is_empty() => {
-                    println!("No cocoons found. Create one with: adi cocoon create");
+                    out_info!("No cocoons found. Create one with: adi cocoon create");
                     Ok("No cocoons found".to_string())
                 }
                 Ok(cocoons) => {
                     let mut results = Vec::new();
                     for info in cocoons {
                         let runtime = manager.get_runtime(info.runtime);
-                        println!("--- {} ({}) ---", info.name, info.runtime);
+                        out_info!("{} ({})", info.name, info.runtime);
                         match runtime.check_update(&info.name) {
                             Ok(msg) => {
-                                println!("{}", msg);
+                                print!("{}", msg);
                                 results.push(format!("{}: OK", info.name));
                             }
                             Err(e) => {
-                                println!("Error: {}\n", e);
+                                out_error!("Error: {}", e);
                                 results.push(format!("{}: Error", info.name));
                             }
                         }
@@ -724,7 +732,7 @@ impl CocoonPlugin {
                     let runtime = manager.get_runtime(runtime_type);
                     match runtime.update(&name) {
                         Ok(msg) => {
-                            println!("{}", msg);
+                            print!("{}", msg);
                             Ok(msg)
                         }
                         Err(e) => Err(e),
@@ -738,28 +746,28 @@ impl CocoonPlugin {
         } else if args.all {
             match manager.list_all() {
                 Ok(cocoons) if cocoons.is_empty() => {
-                    println!("No cocoons found. Create one with: adi cocoon create");
+                    out_info!("No cocoons found. Create one with: adi cocoon create");
                     Ok("No cocoons found".to_string())
                 }
                 Ok(cocoons) => {
                     let mut results = Vec::new();
                     for info in cocoons {
                         let runtime = manager.get_runtime(info.runtime);
-                        println!("\n=== Updating {} ({}) ===\n", info.name, info.runtime);
+                        out_info!("Updating {} ({})...", info.name, info.runtime);
                         match runtime.update(&info.name) {
                             Ok(msg) => {
-                                println!("{}", msg);
+                                print!("{}", msg);
                                 results.push(format!("{}: Updated", info.name));
                             }
                             Err(e) => {
-                                println!("Error: {}", e);
+                                out_error!("Error: {}", e);
                                 results.push(format!("{}: Failed", info.name));
                             }
                         }
                     }
-                    println!("\n=== Update Summary ===");
+                    out_info!("Update Summary:");
                     for r in &results {
-                        println!("  {}", r);
+                        out_info!("  {}", r);
                     }
                     Ok(results.join(", "))
                 }
@@ -774,7 +782,7 @@ impl CocoonPlugin {
     #[command(name = "version", description = "Show current version")]
     async fn version(&self) -> CmdResult {
         let version = env!("CARGO_PKG_VERSION");
-        println!("cocoon {}", version);
+        out_info!("cocoon {}", version);
         Ok(format!("cocoon {}", version))
     }
 }

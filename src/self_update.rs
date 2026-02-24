@@ -4,10 +4,11 @@
 //! - Docker: Pull latest image and recreate container
 //! - Machine: Download new binary and restart service
 
+use lib_console_output::out_info;
 use semver::Version;
 use std::path::PathBuf;
 
-use lib_env_parse::{env_vars, env_opt};
+use lib_env_parse::{env_opt, env_vars};
 
 env_vars! {
     Home => "HOME",
@@ -104,9 +105,9 @@ pub fn download_latest_binary(install_dir: &PathBuf) -> Result<String, String> {
     let current_version = cargo_crate_version!();
     let target = get_target_triple();
 
-    println!("  Current version: {}", current_version);
-    println!("  Target: {}", target);
-    println!("  Checking for updates...");
+    out_info!("  Current version: {}", current_version);
+    out_info!("  Target: {}", target);
+    out_info!("  Checking for updates...");
 
     let status = Update::configure()
         .repo_owner(REPO_OWNER)
@@ -131,6 +132,7 @@ pub fn download_latest_binary(install_dir: &PathBuf) -> Result<String, String> {
 
 /// Docker-specific update functions
 pub mod docker {
+    use lib_console_output::out_info;
     use super::DOCKER_IMAGE;
 
     /// Pull the latest image and return whether it was updated
@@ -150,7 +152,7 @@ pub mod docker {
                 }
             });
 
-        println!("  Pulling {}...", image);
+        out_info!("  Pulling {}...", image);
 
         let output = std::process::Command::new("docker")
             .args(["pull", &image])
@@ -248,23 +250,23 @@ pub mod docker {
         let image = format!("{}:{}", DOCKER_IMAGE, tag);
 
         // Get container config before removing
-        println!("  Saving container configuration...");
+        out_info!("  Saving container configuration...");
         let env_vars = get_container_env(container_name)?;
         let volumes = get_container_volumes(container_name)?;
 
         // Stop and remove old container
-        println!("  Stopping old container...");
+        out_info!("  Stopping old container...");
         let _ = std::process::Command::new("docker")
             .args(["stop", container_name])
             .status();
 
-        println!("  Removing old container...");
+        out_info!("  Removing old container...");
         let _ = std::process::Command::new("docker")
             .args(["rm", container_name])
             .status();
 
         // Create new container with same config
-        println!("  Creating new container...");
+        out_info!("  Creating new container...");
         let mut cmd = std::process::Command::new("docker");
         cmd.args([
             "run",
@@ -377,7 +379,7 @@ pub mod machine {
     pub fn update_binary() -> Result<String, String> {
         let install_dir = get_install_dir()?;
 
-        println!("  Install directory: {}", install_dir.display());
+        out_info!("  Install directory: {}", install_dir.display());
 
         // Ensure install directory exists
         if !install_dir.exists() {
@@ -390,14 +392,14 @@ pub mod machine {
 
     /// Update and restart the service
     pub fn update_and_restart() -> Result<String, String> {
-        println!("Updating cocoon binary...");
+        out_info!("Updating cocoon binary...");
         let update_result = update_binary()?;
 
         if update_result.contains("Already up to date") {
             return Ok(update_result);
         }
 
-        println!("\nRestarting service...");
+        out_info!("Restarting service...");
 
         let os = detect_os();
         match os {

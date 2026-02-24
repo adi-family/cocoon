@@ -29,6 +29,9 @@ inquire = "0.7"
 # Environment
 lib-env-parse = { path = "../lib/lib-env-parse" }
 
+# Console output
+lib-console-output = { path = "../lib/lib-console-output" }
+
 # Daemon management
 lib-daemon-core = { path = "../lib/lib-daemon-core" }
 

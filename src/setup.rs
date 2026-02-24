@@ -3,6 +3,7 @@
 //! Starts a local HTTP server that the browser connects to with a setup token,
 //! then installs and starts the cocoon as a machine runtime service.
 
+use lib_console_output::{out_info, out_success, out_warn};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -30,10 +31,10 @@ pub async fn run_setup(port: u16) -> Result<String, String> {
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
 
-    println!("\nStarting ADI local server...\n");
-    println!("  Name: {}", hostname);
-    println!("  URL:  http://localhost:{}", port);
-    println!("\nWaiting for browser connection... (Ctrl+C to stop)\n");
+    out_info!("Starting ADI local server...");
+    out_info!("  Name: {}", hostname);
+    out_info!("  URL:  http://localhost:{}", port);
+    out_info!("Waiting for browser connection... (Ctrl+C to stop)");
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -44,7 +45,7 @@ pub async fn run_setup(port: u16) -> Result<String, String> {
     });
 
     let result = if let Some(req) = connect_rx.recv().await {
-        println!("Browser connected! Setting up cocoon...\n");
+        out_info!("Browser connected! Setting up cocoon...");
 
         std::env::set_var("SIGNALING_SERVER_URL", &req.signaling_url);
         std::env::set_var("COCOON_SETUP_TOKEN", &req.token);
@@ -57,10 +58,10 @@ pub async fn run_setup(port: u16) -> Result<String, String> {
 
         match crate::service_install() {
             Ok(msg) => {
-                println!("{}", msg);
+                out_success!("{}", msg);
                 match crate::service_start() {
-                    Ok(start_msg) => println!("{}", start_msg),
-                    Err(e) => println!("Warning: Failed to start service: {}", e),
+                    Ok(start_msg) => out_success!("{}", start_msg),
+                    Err(e) => out_warn!("Failed to start service: {}", e),
                 }
                 Ok("Cocoon installed and running as a background service".to_string())
             }

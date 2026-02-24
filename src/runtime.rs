@@ -3,6 +3,7 @@
 //! Supports Docker containers and Machine (native systemd/launchd) services.
 
 use crate::self_update;
+use lib_console_output::out_info;
 use std::fmt;
 
 use lib_daemon_core::{get_service_manager, ServiceStatus as DaemonServiceStatus, Platform};
@@ -70,15 +71,6 @@ impl CocoonInfo {
             CocoonStatus::Stopped => "○",
             CocoonStatus::Restarting => "◐",
             CocoonStatus::Unknown(_) => "?",
-        }
-    }
-
-    pub fn status_color(&self) -> &'static str {
-        match self.status {
-            CocoonStatus::Running => "\x1b[32m",    // green
-            CocoonStatus::Stopped => "\x1b[90m",    // gray
-            CocoonStatus::Restarting => "\x1b[33m", // yellow
-            CocoonStatus::Unknown(_) => "\x1b[31m", // red
         }
     }
 }
@@ -272,7 +264,7 @@ impl Runtime for DockerRuntime {
 
         if follow {
             cmd.arg("-f");
-            println!("Following logs for '{}' (Ctrl+C to stop)...\n", name);
+            out_info!("Following logs for '{}' (Ctrl+C to stop)...", name);
         }
 
         cmd.arg(name);
@@ -329,7 +321,7 @@ impl Runtime for DockerRuntime {
     }
 
     fn update(&self, name: &str) -> Result<String, String> {
-        println!("Updating Docker cocoon '{}'...\n", name);
+        out_info!("Updating Docker cocoon '{}'...", name);
 
         // Check if container exists
         let _ = self.status(name)?;
@@ -351,7 +343,7 @@ impl Runtime for DockerRuntime {
     }
 
     fn check_update(&self, name: &str) -> Result<String, String> {
-        println!("Checking for updates for Docker cocoon '{}'...\n", name);
+        out_info!("Checking for updates for Docker cocoon '{}'...", name);
 
         // Check if container exists
         let info = self.status(name)?;
@@ -467,7 +459,7 @@ impl Runtime for MachineRuntime {
                 if let Some(n) = tail {
                     cmd.args(["-n", &n.to_string()]);
                 }
-                println!("Following logs (Ctrl+C to stop)...");
+                out_info!("Following logs (Ctrl+C to stop)...");
                 cmd.status().map_err(|e| format!("Failed to view logs: {}", e))?;
                 return Ok(());
             }
@@ -480,7 +472,7 @@ impl Runtime for MachineRuntime {
                     cmd.arg("-n").arg(n.to_string());
                 }
                 cmd.arg("/tmp/cocoon.log");
-                println!("Following logs (Ctrl+C to stop)...");
+                out_info!("Following logs (Ctrl+C to stop)...");
                 cmd.status().map_err(|e| format!("Failed to view logs: {}", e))?;
                 return Ok(());
             }
@@ -491,7 +483,7 @@ impl Runtime for MachineRuntime {
             let manager = get_service_manager();
             let lines = tail.unwrap_or(50) as usize;
             let content = block_service(|| async move { manager.logs("cocoon", lines).await })?;
-            println!("{}", content);
+            print!("{}", content);
             Ok(())
         }
     }
@@ -511,7 +503,7 @@ impl Runtime for MachineRuntime {
     }
 
     fn update(&self, _name: &str) -> Result<String, String> {
-        println!("Updating Machine cocoon...\n");
+        out_info!("Updating Machine cocoon...");
 
         let manager = get_service_manager();
         let installed = block_service(|| async move { manager.is_installed("cocoon").await })
@@ -528,7 +520,7 @@ impl Runtime for MachineRuntime {
     }
 
     fn check_update(&self, _name: &str) -> Result<String, String> {
-        println!("Checking for updates for Machine cocoon...\n");
+        out_info!("Checking for updates for Machine cocoon...");
 
         let manager = get_service_manager();
         let installed = block_service(|| async move { manager.is_installed("cocoon").await })

@@ -1,7 +1,8 @@
 //! Interactive CLI mode using inquire.
 
-use crate::runtime::{CocoonInfo, RuntimeManager, RuntimeType};
+use crate::runtime::{CocoonInfo, CocoonStatus, RuntimeManager, RuntimeType};
 use inquire::{Confirm, Select, Text};
+use lib_console_output::{out_error, out_info, out_success, out_warn, theme, Columns, KeyValue, Renderable};
 
 /// Actions available in interactive mode
 #[derive(Debug, Clone)]
@@ -41,8 +42,7 @@ impl std::fmt::Display for InteractiveAction {
 
 /// Run interactive mode
 pub fn run_interactive(manager: &RuntimeManager) -> Result<(), String> {
-    println!("\nCocoon Interactive Mode");
-    println!("=======================\n");
+    out_info!("Cocoon Interactive Mode");
 
     loop {
         let actions = vec![
@@ -67,63 +67,63 @@ pub fn run_interactive(manager: &RuntimeManager) -> Result<(), String> {
         match selection {
             Ok(InteractiveAction::List) => {
                 if let Err(e) = handle_list(manager) {
-                    println!("Error: {}\n", e);
+                    out_error!("{}", e);
                 }
             }
             Ok(InteractiveAction::Status) => {
                 if let Err(e) = handle_status_interactive(manager) {
-                    println!("Error: {}\n", e);
+                    out_error!("{}", e);
                 }
             }
             Ok(InteractiveAction::Start) => {
                 if let Err(e) = handle_start_interactive(manager) {
-                    println!("Error: {}\n", e);
+                    out_error!("{}", e);
                 }
             }
             Ok(InteractiveAction::Stop) => {
                 if let Err(e) = handle_stop_interactive(manager) {
-                    println!("Error: {}\n", e);
+                    out_error!("{}", e);
                 }
             }
             Ok(InteractiveAction::Restart) => {
                 if let Err(e) = handle_restart_interactive(manager) {
-                    println!("Error: {}\n", e);
+                    out_error!("{}", e);
                 }
             }
             Ok(InteractiveAction::Logs) => {
                 if let Err(e) = handle_logs_interactive(manager) {
-                    println!("Error: {}\n", e);
+                    out_error!("{}", e);
                 }
             }
             Ok(InteractiveAction::Update) => {
                 if let Err(e) = handle_update_interactive(manager) {
-                    println!("Error: {}\n", e);
+                    out_error!("{}", e);
                 }
             }
             Ok(InteractiveAction::CheckUpdate) => {
                 if let Err(e) = handle_check_update_interactive(manager) {
-                    println!("Error: {}\n", e);
+                    out_error!("{}", e);
                 }
             }
             Ok(InteractiveAction::Remove) => {
                 if let Err(e) = handle_remove_interactive(manager) {
-                    println!("Error: {}\n", e);
+                    out_error!("{}", e);
                 }
             }
             Ok(InteractiveAction::Create) => {
                 if let Err(e) = handle_create_interactive(manager) {
-                    println!("Error: {}\n", e);
+                    out_error!("{}", e);
                 }
             }
             Ok(InteractiveAction::Help) => {
                 print_help();
             }
             Ok(InteractiveAction::Exit) => {
-                println!("Goodbye!");
+                out_info!("Goodbye!");
                 break;
             }
             Err(_) => {
-                println!("Cancelled");
+                out_warn!("Cancelled");
                 break;
             }
         }
@@ -134,15 +134,14 @@ pub fn run_interactive(manager: &RuntimeManager) -> Result<(), String> {
 
 /// Format cocoon info for display
 fn format_cocoon(info: &CocoonInfo) -> String {
-    let reset = "\x1b[0m";
-    format!(
-        "{}{}{} {} [{}]",
-        info.status_color(),
-        info.status_icon(),
-        reset,
-        info.name,
-        info.runtime
-    )
+    let icon = info.status_icon();
+    let styled_icon = match &info.status {
+        CocoonStatus::Running => theme::success(icon).to_string(),
+        CocoonStatus::Stopped => theme::muted(icon).to_string(),
+        CocoonStatus::Restarting => theme::warning(icon).to_string(),
+        CocoonStatus::Unknown(_) => theme::error(icon).to_string(),
+    };
+    format!("{} {} [{}]", styled_icon, info.name, info.runtime)
 }
 
 /// Handle list command
@@ -150,27 +149,25 @@ pub fn handle_list(manager: &RuntimeManager) -> Result<(), String> {
     let cocoons = manager.list_all()?;
 
     if cocoons.is_empty() {
-        println!("\nNo cocoons found.");
-        println!("Create one with: adi cocoon create\n");
+        out_info!("No cocoons found. Create one with: adi cocoon create");
         return Ok(());
     }
 
-    println!("\n{:<20} {:<10} {:<10}", "NAME", "RUNTIME", "STATUS");
-    println!("{}", "-".repeat(42));
-
-    let reset = "\x1b[0m";
-    for cocoon in &cocoons {
-        println!(
-            "{:<20} {:<10} {}{}{}{}",
-            cocoon.name,
-            cocoon.runtime,
-            cocoon.status_color(),
-            cocoon.status_icon(),
-            cocoon.status,
-            reset
-        );
-    }
+    let cols = cocoons.iter().fold(
+        Columns::new().header(["NAME", "RUNTIME", "STATUS"]),
+        |cols, cocoon| {
+            let status_str = format!("{} {}", cocoon.status_icon(), cocoon.status);
+            let styled_status = match &cocoon.status {
+                CocoonStatus::Running => theme::success(&status_str).to_string(),
+                CocoonStatus::Stopped => theme::muted(&status_str).to_string(),
+                CocoonStatus::Restarting => theme::warning(&status_str).to_string(),
+                CocoonStatus::Unknown(_) => theme::error(&status_str).to_string(),
+            };
+            cols.row([cocoon.name.clone(), cocoon.runtime.to_string(), styled_status])
+        },
+    );
     println!();
+    cols.print();
 
     Ok(())
 }
@@ -204,22 +201,25 @@ fn handle_status_interactive(manager: &RuntimeManager) -> Result<(), String> {
     let runtime = manager.get_runtime(cocoon.runtime);
     let info = runtime.status(&cocoon.name)?;
 
-    let reset = "\x1b[0m";
-    println!("\nCocoon: {}", info.name);
-    println!("Runtime: {}", info.runtime);
-    println!(
-        "Status: {}{}{}{}",
-        info.status_color(),
-        info.status_icon(),
-        info.status,
-        reset
-    );
+    let status_str = format!("{} {}", info.status_icon(), info.status);
+    let styled_status = match &info.status {
+        CocoonStatus::Running => theme::success(&status_str).to_string(),
+        CocoonStatus::Stopped => theme::muted(&status_str).to_string(),
+        CocoonStatus::Restarting => theme::warning(&status_str).to_string(),
+        CocoonStatus::Unknown(_) => theme::error(&status_str).to_string(),
+    };
+    let mut kv = KeyValue::new()
+        .entry("Cocoon", &info.name)
+        .entry("Runtime", info.runtime.to_string())
+        .entry("Status", styled_status);
     if let Some(image) = &info.image {
-        println!("Image: {}", image);
+        kv = kv.entry("Image", image);
     }
     if let Some(created) = &info.created {
-        println!("Created: {}", created);
+        kv = kv.entry("Created", created);
     }
+    println!();
+    kv.print();
     println!();
 
     Ok(())
@@ -230,9 +230,9 @@ fn handle_start_interactive(manager: &RuntimeManager) -> Result<(), String> {
     let cocoon = select_cocoon(manager, "Select cocoon to start:")?;
     let runtime = manager.get_runtime(cocoon.runtime);
 
-    println!("Starting '{}'...", cocoon.name);
+    out_info!("Starting '{}'...", cocoon.name);
     let result = runtime.start(&cocoon.name)?;
-    println!("{}\n", result);
+    out_success!("{}", result);
 
     Ok(())
 }
@@ -242,9 +242,9 @@ fn handle_stop_interactive(manager: &RuntimeManager) -> Result<(), String> {
     let cocoon = select_cocoon(manager, "Select cocoon to stop:")?;
     let runtime = manager.get_runtime(cocoon.runtime);
 
-    println!("Stopping '{}'...", cocoon.name);
+    out_info!("Stopping '{}'...", cocoon.name);
     let result = runtime.stop(&cocoon.name)?;
-    println!("{}\n", result);
+    out_success!("{}", result);
 
     Ok(())
 }
@@ -254,9 +254,9 @@ fn handle_restart_interactive(manager: &RuntimeManager) -> Result<(), String> {
     let cocoon = select_cocoon(manager, "Select cocoon to restart:")?;
     let runtime = manager.get_runtime(cocoon.runtime);
 
-    println!("Restarting '{}'...", cocoon.name);
+    out_info!("Restarting '{}'...", cocoon.name);
     let result = runtime.restart(&cocoon.name)?;
-    println!("{}\n", result);
+    out_success!("{}", result);
 
     Ok(())
 }
@@ -291,13 +291,13 @@ fn handle_update_interactive(manager: &RuntimeManager) -> Result<(), String> {
     .unwrap_or(false);
 
     if !confirm {
-        println!("Cancelled\n");
+        out_warn!("Cancelled");
         return Ok(());
     }
 
-    println!("\nUpdating '{}'...\n", cocoon.name);
+    out_info!("Updating '{}'...", cocoon.name);
     let result = runtime.update(&cocoon.name)?;
-    println!("{}\n", result);
+    out_success!("{}", result);
 
     Ok(())
 }
@@ -308,7 +308,7 @@ fn handle_check_update_interactive(manager: &RuntimeManager) -> Result<(), Strin
     let runtime = manager.get_runtime(cocoon.runtime);
 
     let result = runtime.check_update(&cocoon.name)?;
-    println!("{}", result);
+    print!("{}", result);
 
     Ok(())
 }
@@ -324,18 +324,18 @@ fn handle_remove_interactive(manager: &RuntimeManager) -> Result<(), String> {
         .unwrap_or(false);
 
     if !confirm {
-        println!("Cancelled\n");
+        out_warn!("Cancelled");
         return Ok(());
     }
 
-    let force = matches!(cocoon.status, crate::runtime::CocoonStatus::Running);
+    let force = matches!(cocoon.status, CocoonStatus::Running);
     if force {
-        println!("Cocoon is running, will force stop first...");
+        out_warn!("Cocoon is running, will force stop first...");
     }
 
-    println!("Removing '{}'...", cocoon.name);
+    out_info!("Removing '{}'...", cocoon.name);
     let result = runtime.remove(&cocoon.name, force)?;
-    println!("{}\n", result);
+    out_success!("{}", result);
 
     Ok(())
 }
@@ -419,15 +419,14 @@ fn create_docker_cocoon_interactive() -> Result<(), String> {
 
     docker_cmd.arg("docker-registry.the-ihor.com/cocoon:latest");
 
-    println!("\nCreating Docker cocoon '{}'...", name);
+    out_info!("Creating Docker cocoon '{}'...", name);
 
     match docker_cmd.output() {
         Ok(output) if output.status.success() => {
             let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            println!("Container created: {}", container_id);
-            println!("\nView logs: adi cocoon logs {}", name);
-            println!("Stop: adi cocoon stop {}", name);
-            println!();
+            out_success!("Container created: {}", container_id);
+            out_info!("View logs: adi cocoon logs {}", name);
+            out_info!("Stop: adi cocoon stop {}", name);
             Ok(())
         }
         Ok(output) => {
@@ -456,11 +455,11 @@ fn create_machine_cocoon_interactive() -> Result<(), String> {
         std::env::set_var("COCOON_SETUP_TOKEN", &setup_token);
     }
 
-    println!("\nInstalling machine service...");
+    out_info!("Installing machine service...");
 
     // Use the existing service_install function
     let result = crate::service_install()?;
-    println!("{}", result);
+    out_success!("{}", result);
 
     let start = Confirm::new("Start service now?")
         .with_default(true)
@@ -469,10 +468,9 @@ fn create_machine_cocoon_interactive() -> Result<(), String> {
 
     if start {
         let start_result = crate::service_start()?;
-        println!("{}", start_result);
+        out_success!("{}", start_result);
     }
 
-    println!();
     Ok(())
 }
 
