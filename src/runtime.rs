@@ -5,11 +5,7 @@
 use crate::self_update;
 use std::fmt;
 
-use lib_env_parse::{env_vars, env_opt};
-
-env_vars! {
-    Home => "HOME",
-}
+use lib_daemon_core::{get_service_manager, ServiceStatus as DaemonServiceStatus, Platform};
 
 /// Runtime type for a cocoon instance
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -381,7 +377,20 @@ impl Runtime for DockerRuntime {
     }
 }
 
-// === Machine Runtime (systemd/launchd) ===
+// === Machine Runtime (systemd/launchd via lib-daemon-core) ===
+
+/// Run an async service manager operation synchronously.
+/// Uses block_in_place to avoid blocking the async runtime.
+fn block_service<T, F>(f: impl FnOnce() -> F) -> Result<T, String>
+where
+    F: std::future::Future<Output = lib_daemon_core::Result<T>>,
+    T: Send,
+{
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(f())
+    })
+    .map_err(|e| e.to_string())
+}
 
 pub struct MachineRuntime;
 
@@ -389,281 +398,112 @@ impl MachineRuntime {
     pub fn new() -> Self {
         MachineRuntime
     }
-
-    fn detect_os() -> &'static str {
-        #[cfg(target_os = "linux")]
-        return "linux";
-
-        #[cfg(target_os = "macos")]
-        return "macos";
-
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        return "unknown";
-    }
-
-    fn get_service_status_linux() -> Result<CocoonStatus, String> {
-        let output = std::process::Command::new("systemctl")
-            .args(["--user", "is-active", "cocoon"])
-            .output()
-            .map_err(|e| format!("Failed to run systemctl: {}", e))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        Ok(match stdout.as_str() {
-            "active" => CocoonStatus::Running,
-            "inactive" => CocoonStatus::Stopped,
-            "activating" | "reloading" => CocoonStatus::Restarting,
-            _ => CocoonStatus::Unknown(stdout),
-        })
-    }
-
-    fn get_service_status_macos() -> Result<CocoonStatus, String> {
-        let output = std::process::Command::new("launchctl")
-            .args(["list"])
-            .output()
-            .map_err(|e| format!("Failed to run launchctl: {}", e))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let is_running = stdout.lines().any(|line| line.contains("com.adi.cocoon"));
-
-        Ok(if is_running {
-            CocoonStatus::Running
-        } else {
-            CocoonStatus::Stopped
-        })
-    }
-
-    fn is_service_installed() -> bool {
-        let os = Self::detect_os();
-        match os {
-            "linux" => {
-                let home = env_opt(EnvVar::Home.as_str()).unwrap_or_default();
-                std::path::Path::new(&format!("{}/.config/systemd/user/cocoon.service", home))
-                    .exists()
-            }
-            "macos" => {
-                let home = env_opt(EnvVar::Home.as_str()).unwrap_or_default();
-                std::path::Path::new(&format!(
-                    "{}/Library/LaunchAgents/com.adi.cocoon.plist",
-                    home
-                ))
-                .exists()
-            }
-            _ => false,
-        }
-    }
 }
 
 impl Runtime for MachineRuntime {
     fn list(&self) -> Result<Vec<CocoonInfo>, String> {
-        if !Self::is_service_installed() {
+        let manager = get_service_manager();
+        let svc_status = block_service(|| async move { manager.status("cocoon").await })?;
+
+        if matches!(svc_status, DaemonServiceStatus::NotInstalled) {
             return Ok(vec![]);
         }
 
-        let status = self.status("cocoon")?;
-        Ok(vec![status])
+        let cocoon_status = map_service_status(&svc_status);
+        Ok(vec![CocoonInfo {
+            name: "cocoon".to_string(),
+            runtime: RuntimeType::Machine,
+            status: cocoon_status,
+            created: None,
+            image: None,
+        }])
     }
 
     fn status(&self, _name: &str) -> Result<CocoonInfo, String> {
-        if !Self::is_service_installed() {
+        let manager = get_service_manager();
+        let svc_status = block_service(|| async move { manager.status("cocoon").await })?;
+
+        if matches!(svc_status, DaemonServiceStatus::NotInstalled) {
             return Err(
                 "Machine service not installed. Install with: adi cocoon create --runtime machine"
                     .to_string(),
             );
         }
 
-        let os = Self::detect_os();
-        let status = match os {
-            "linux" => Self::get_service_status_linux()?,
-            "macos" => Self::get_service_status_macos()?,
-            _ => return Err("Unsupported OS".to_string()),
-        };
-
         Ok(CocoonInfo {
             name: "cocoon".to_string(),
             runtime: RuntimeType::Machine,
-            status,
+            status: map_service_status(&svc_status),
             created: None,
             image: None,
         })
     }
 
     fn start(&self, _name: &str) -> Result<String, String> {
-        let os = Self::detect_os();
-
-        match os {
-            "linux" => {
-                let output = std::process::Command::new("systemctl")
-                    .args(["--user", "start", "cocoon"])
-                    .output()
-                    .map_err(|e| format!("Failed to start service: {}", e))?;
-
-                if output.status.success() {
-                    Ok("Service started".to_string())
-                } else {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    Err(format!("Failed to start service: {}", stderr))
-                }
-            }
-            "macos" => {
-                let home = env_opt(EnvVar::Home.as_str()).ok_or_else(|| "HOME not set".to_string())?;
-                let plist = format!("{}/Library/LaunchAgents/com.adi.cocoon.plist", home);
-
-                let output = std::process::Command::new("launchctl")
-                    .args(["load", &plist])
-                    .output()
-                    .map_err(|e| format!("Failed to load service: {}", e))?;
-
-                if output.status.success() {
-                    Ok("Service loaded".to_string())
-                } else {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    Err(format!("Failed to load service: {}", stderr))
-                }
-            }
-            _ => Err("Unsupported OS".to_string()),
-        }
+        let manager = get_service_manager();
+        block_service(|| async move { manager.start("cocoon").await })
+            .map(|_| "Service started".to_string())
     }
 
     fn stop(&self, _name: &str) -> Result<String, String> {
-        let os = Self::detect_os();
-
-        match os {
-            "linux" => {
-                let output = std::process::Command::new("systemctl")
-                    .args(["--user", "stop", "cocoon"])
-                    .output()
-                    .map_err(|e| format!("Failed to stop service: {}", e))?;
-
-                if output.status.success() {
-                    Ok("Service stopped".to_string())
-                } else {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    Err(format!("Failed to stop service: {}", stderr))
-                }
-            }
-            "macos" => {
-                let home = env_opt(EnvVar::Home.as_str()).ok_or_else(|| "HOME not set".to_string())?;
-                let plist = format!("{}/Library/LaunchAgents/com.adi.cocoon.plist", home);
-
-                let output = std::process::Command::new("launchctl")
-                    .args(["unload", &plist])
-                    .output()
-                    .map_err(|e| format!("Failed to unload service: {}", e))?;
-
-                if output.status.success() {
-                    Ok("Service unloaded".to_string())
-                } else {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    Err(format!("Failed to unload service: {}", stderr))
-                }
-            }
-            _ => Err("Unsupported OS".to_string()),
-        }
+        let manager = get_service_manager();
+        block_service(|| async move { manager.stop("cocoon").await })
+            .map(|_| "Service stopped".to_string())
     }
 
-    fn restart(&self, name: &str) -> Result<String, String> {
-        self.stop(name)?;
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        self.start(name)
+    fn restart(&self, _name: &str) -> Result<String, String> {
+        let manager = get_service_manager();
+        block_service(|| async move { manager.restart("cocoon").await })
+            .map(|_| "Service restarted".to_string())
     }
 
     fn logs(&self, _name: &str, follow: bool, tail: Option<u32>) -> Result<(), String> {
-        let os = Self::detect_os();
-
-        match os {
-            "linux" => {
+        if follow {
+            // ServiceManager::logs doesn't stream — use platform commands for follow mode
+            #[cfg(target_os = "linux")]
+            {
                 let mut cmd = std::process::Command::new("journalctl");
-                cmd.args(["--user", "-u", "cocoon"]);
-
-                if follow {
-                    cmd.arg("-f");
-                }
-
+                cmd.args(["--user", "-u", "cocoon", "-f"]);
                 if let Some(n) = tail {
                     cmd.args(["-n", &n.to_string()]);
                 }
-
                 println!("Following logs (Ctrl+C to stop)...");
-                cmd.status()
-                    .map_err(|e| format!("Failed to view logs: {}", e))?;
-                Ok(())
+                cmd.status().map_err(|e| format!("Failed to view logs: {}", e))?;
+                return Ok(());
             }
-            "macos" => {
+
+            #[cfg(target_os = "macos")]
+            {
                 let mut cmd = std::process::Command::new("tail");
-
-                if follow {
-                    cmd.arg("-f");
-                }
-
+                cmd.arg("-f");
                 if let Some(n) = tail {
                     cmd.arg("-n").arg(n.to_string());
                 }
-
                 cmd.arg("/tmp/cocoon.log");
                 println!("Following logs (Ctrl+C to stop)...");
-                cmd.status()
-                    .map_err(|e| format!("Failed to view logs: {}", e))?;
-                Ok(())
+                cmd.status().map_err(|e| format!("Failed to view logs: {}", e))?;
+                return Ok(());
             }
-            _ => Err("Unsupported OS".to_string()),
+
+            #[allow(unreachable_code)]
+            Err("Unsupported OS".to_string())
+        } else {
+            let manager = get_service_manager();
+            let lines = tail.unwrap_or(50) as usize;
+            let content = block_service(|| async move { manager.logs("cocoon", lines).await })?;
+            println!("{}", content);
+            Ok(())
         }
     }
 
     fn remove(&self, _name: &str, _force: bool) -> Result<String, String> {
-        // Stop service first
-        let _ = self.stop("cocoon");
-
-        let os = Self::detect_os();
-
-        match os {
-            "linux" => {
-                let home = env_opt(EnvVar::Home.as_str()).ok_or_else(|| "HOME not set".to_string())?;
-                let service_file = format!("{}/.config/systemd/user/cocoon.service", home);
-
-                std::process::Command::new("systemctl")
-                    .args(["--user", "disable", "cocoon"])
-                    .status()
-                    .ok();
-
-                if std::path::Path::new(&service_file).exists() {
-                    std::fs::remove_file(&service_file)
-                        .map_err(|e| format!("Failed to remove service file: {}", e))?;
-                }
-
-                std::process::Command::new("systemctl")
-                    .args(["--user", "daemon-reload"])
-                    .status()
-                    .ok();
-
-                Ok("Service uninstalled".to_string())
-            }
-            "macos" => {
-                let home = env_opt(EnvVar::Home.as_str()).ok_or_else(|| "HOME not set".to_string())?;
-                let plist = format!("{}/Library/LaunchAgents/com.adi.cocoon.plist", home);
-
-                if std::path::Path::new(&plist).exists() {
-                    std::fs::remove_file(&plist)
-                        .map_err(|e| format!("Failed to remove plist: {}", e))?;
-                }
-
-                Ok("Service uninstalled".to_string())
-            }
-            _ => Err("Unsupported OS".to_string()),
-        }
+        let manager = get_service_manager();
+        block_service(|| async move { manager.uninstall("cocoon").await })
+            .map(|_| "Service uninstalled".to_string())
     }
 
     fn is_available(&self) -> bool {
-        let os = Self::detect_os();
-        match os {
-            "linux" => std::process::Command::new("systemctl")
-                .arg("--user")
-                .arg("--version")
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false),
-            "macos" => true, // launchd is always available on macOS
-            _ => false,
-        }
+        matches!(Platform::current(), Platform::Linux | Platform::MacOS)
     }
 
     fn runtime_type(&self) -> RuntimeType {
@@ -673,23 +513,28 @@ impl Runtime for MachineRuntime {
     fn update(&self, _name: &str) -> Result<String, String> {
         println!("Updating Machine cocoon...\n");
 
-        // Check if service is installed
-        if !Self::is_service_installed() {
+        let manager = get_service_manager();
+        let installed = block_service(|| async move { manager.is_installed("cocoon").await })
+            .unwrap_or(false);
+
+        if !installed {
             return Err(
                 "Machine service not installed. Install with: adi cocoon create --runtime machine"
                     .to_string(),
             );
         }
 
-        // Update binary and restart service
         self_update::machine::update_and_restart()
     }
 
     fn check_update(&self, _name: &str) -> Result<String, String> {
         println!("Checking for updates for Machine cocoon...\n");
 
-        // Check if service is installed
-        if !Self::is_service_installed() {
+        let manager = get_service_manager();
+        let installed = block_service(|| async move { manager.is_installed("cocoon").await })
+            .unwrap_or(false);
+
+        if !installed {
             return Err(
                 "Machine service not installed. Install with: adi cocoon create --runtime machine"
                     .to_string(),
@@ -698,6 +543,18 @@ impl Runtime for MachineRuntime {
 
         let check_result = self_update::check_for_updates()?;
         Ok(self_update::format_check_result(&check_result))
+    }
+}
+
+fn map_service_status(s: &DaemonServiceStatus) -> CocoonStatus {
+    match s {
+        DaemonServiceStatus::Running { .. } => CocoonStatus::Running,
+        DaemonServiceStatus::Stopped | DaemonServiceStatus::NotInstalled => CocoonStatus::Stopped,
+        DaemonServiceStatus::Starting | DaemonServiceStatus::Stopping => CocoonStatus::Restarting,
+        DaemonServiceStatus::Failed { reason } => {
+            CocoonStatus::Unknown(reason.clone().unwrap_or_else(|| "failed".to_string()))
+        }
+        DaemonServiceStatus::Unknown => CocoonStatus::Unknown("unknown".to_string()),
     }
 }
 

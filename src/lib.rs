@@ -32,26 +32,82 @@ env_vars! {
     CocoonSecret => "COCOON_SECRET",
 }
 
-use lib_plugin_abi_v3::{
-    async_trait,
-    cli::{CliCommand, CliCommands, CliContext, CliResult},
-    Plugin, PluginContext, PluginMetadata, PluginType, Result as PluginResult, SERVICE_CLI_COMMANDS,
-};
+use lib_plugin_prelude::*;
+
+// === CLI Args ===
+
+#[derive(CliArgs)]
+pub struct NameArg {
+    #[arg(position = 0)]
+    pub name: Option<String>,
+}
+
+#[derive(CliArgs)]
+pub struct LogsArgs {
+    #[arg(position = 0)]
+    pub name: Option<String>,
+
+    #[arg(long = "f")]
+    pub follow: bool,
+
+    #[arg(long)]
+    pub tail: Option<u32>,
+}
+
+#[derive(CliArgs)]
+pub struct RmArgs {
+    #[arg(position = 0)]
+    pub name: Option<String>,
+
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(CliArgs)]
+pub struct CreateArgs {
+    #[arg(long)]
+    pub runtime: Option<String>,
+
+    #[arg(long)]
+    pub name: Option<String>,
+
+    #[arg(long)]
+    pub url: Option<String>,
+
+    #[arg(long)]
+    pub token: Option<String>,
+
+    #[arg(long)]
+    pub secret: Option<String>,
+
+    #[arg(long)]
+    pub start: bool,
+}
+
+#[derive(CliArgs)]
+pub struct SetupArgs {
+    #[arg(long)]
+    pub port: Option<u16>,
+}
+
+#[derive(CliArgs)]
+pub struct CheckUpdateArgs {
+    #[arg(position = 0)]
+    pub name: Option<String>,
+}
+
+#[derive(CliArgs)]
+pub struct UpdateArgs {
+    #[arg(position = 0)]
+    pub name: Option<String>,
+
+    #[arg(long)]
+    pub all: bool,
+}
 
 // === Service Management Helpers ===
 
-fn detect_os() -> &'static str {
-    #[cfg(target_os = "linux")]
-    return "linux";
-
-    #[cfg(target_os = "macos")]
-    return "macos";
-
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    return "unknown";
-}
-
-fn get_binary_path() -> Result<std::path::PathBuf, String> {
+fn get_binary_path() -> std::result::Result<std::path::PathBuf, String> {
     std::env::current_exe().map_err(|e| format!("Failed to get current binary path: {}", e))
 }
 
@@ -62,28 +118,14 @@ fn generate_secret() -> String {
     base64::engine::general_purpose::STANDARD.encode(&bytes)
 }
 
-pub fn service_install() -> Result<String, String> {
-    let os = detect_os();
+pub fn service_install() -> std::result::Result<String, String> {
+    use lib_daemon_core::{get_service_manager, ServiceConfig, RestartPolicy};
 
-    match os {
-        "linux" => install_systemd_service(),
-        "macos" => install_launchd_service(),
-        _ => Err("Unsupported OS for service installation".to_string()),
-    }
-}
-
-fn install_systemd_service() -> Result<String, String> {
     let signaling_url = env_opt(EnvVar::SignalingServerUrl.as_str())
         .unwrap_or_else(|| "ws://localhost:8080/ws".to_string());
 
     let home_dir =
         env_opt(EnvVar::Home.as_str()).ok_or_else(|| "HOME environment variable not set".to_string())?;
-
-    let service_dir = format!("{}/.config/systemd/user", home_dir);
-    let service_file = format!("{}/cocoon.service", service_dir);
-
-    std::fs::create_dir_all(&service_dir)
-        .map_err(|e| format!("Failed to create service directory: {}", e))?;
 
     let config_dir = format!("{}/.config/cocoon", home_dir);
     std::fs::create_dir_all(&config_dir)
@@ -110,150 +152,35 @@ fn install_systemd_service() -> Result<String, String> {
         new_secret
     };
 
-    let setup_token = env_opt(EnvVar::CocoonSetupToken.as_str());
     let binary_path = get_binary_path()?;
 
-    let mut service_content = format!(
-        r#"[Unit]
-Description=Cocoon - Remote containerized worker
-After=network-online.target
-Wants=network-online.target
+    let mut config = ServiceConfig::new("cocoon", binary_path)
+        .description("Cocoon - Remote containerized worker")
+        .args(["cocoon", "run"])
+        .env("SIGNALING_SERVER_URL", &signaling_url)
+        .env("COCOON_SECRET", &secret)
+        .stdout_log("/tmp/cocoon.log")
+        .stderr_log("/tmp/cocoon.error.log")
+        .restart_policy(RestartPolicy::Always)
+        .autostart(true);
 
-[Service]
-Type=simple
-ExecStart={} cocoon run
-Restart=always
-RestartSec=5
-Environment=SIGNALING_SERVER_URL={}
-Environment=COCOON_SECRET={}
-"#,
-        binary_path.display(),
-        signaling_url,
-        secret
-    );
-
-    if let Some(token) = setup_token {
-        service_content.push_str(&format!("Environment=COCOON_SETUP_TOKEN={}\n", token));
+    if let Some(token) = env_opt(EnvVar::CocoonSetupToken.as_str()) {
+        config = config.env("COCOON_SETUP_TOKEN", &token);
     }
 
-    service_content.push_str(
-        r#"
-[Install]
-WantedBy=default.target
-"#,
-    );
-
-    std::fs::write(&service_file, service_content)
-        .map_err(|e| format!("Failed to write service file: {}", e))?;
-
-    std::process::Command::new("systemctl")
-        .args(["--user", "daemon-reload"])
-        .status()
-        .map_err(|e| format!("Failed to reload systemd: {}", e))?;
-
-    std::process::Command::new("systemctl")
-        .args(["--user", "enable", "cocoon"])
-        .status()
-        .map_err(|e| format!("Failed to enable service: {}", e))?;
+    let manager = get_service_manager();
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(manager.install(&config))
+    })
+    .map_err(|e| e.to_string())?;
 
     Ok(format!(
-        "Systemd service installed\n\nService file: {}\nSecret file: {}\n\nStart: adi cocoon start cocoon\nStatus: adi cocoon status cocoon\nLogs: adi cocoon logs cocoon",
-        service_file, secret_file
+        "Service installed\n\nSecret file: {}\n\nStart: adi cocoon service start\nStatus: adi cocoon service status\nLogs: adi cocoon service logs",
+        secret_file
     ))
 }
 
-fn install_launchd_service() -> Result<String, String> {
-    let signaling_url = env_opt(EnvVar::SignalingServerUrl.as_str())
-        .unwrap_or_else(|| "ws://localhost:8080/ws".to_string());
-
-    let home_dir =
-        env_opt(EnvVar::Home.as_str()).ok_or_else(|| "HOME environment variable not set".to_string())?;
-
-    let plist_dir = format!("{}/Library/LaunchAgents", home_dir);
-    let plist_file = format!("{}/com.adi.cocoon.plist", plist_dir);
-
-    std::fs::create_dir_all(&plist_dir)
-        .map_err(|e| format!("Failed to create LaunchAgents directory: {}", e))?;
-
-    let config_dir = format!("{}/.config/cocoon", home_dir);
-    std::fs::create_dir_all(&config_dir)
-        .map_err(|e| format!("Failed to create config directory: {}", e))?;
-
-    let secret_file = format!("{}/secret", config_dir);
-    let secret = if std::path::Path::new(&secret_file).exists() {
-        std::fs::read_to_string(&secret_file)
-            .map_err(|e| format!("Failed to read secret: {}", e))?
-            .trim()
-            .to_string()
-    } else {
-        let new_secret = generate_secret();
-        std::fs::write(&secret_file, &new_secret)
-            .map_err(|e| format!("Failed to save secret: {}", e))?;
-        new_secret
-    };
-
-    let setup_token = env_opt(EnvVar::CocoonSetupToken.as_str());
-    let binary_path = get_binary_path()?;
-
-    let mut plist_content = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.adi.cocoon</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>{}</string>
-        <string>cocoon</string>
-        <string>run</string>
-    </array>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>SIGNALING_SERVER_URL</key>
-        <string>{}</string>
-        <key>COCOON_SECRET</key>
-        <string>{}</string>
-"#,
-        binary_path.display(),
-        signaling_url,
-        secret
-    );
-
-    if let Some(token) = setup_token {
-        plist_content.push_str(&format!(
-            r#"        <key>COCOON_SETUP_TOKEN</key>
-        <string>{}</string>
-"#,
-            token
-        ));
-    }
-
-    plist_content.push_str(
-        r#"    </dict>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/tmp/cocoon.log</string>
-    <key>StandardErrorPath</key>
-    <string>/tmp/cocoon.error.log</string>
-</dict>
-</plist>
-"#,
-    );
-
-    std::fs::write(&plist_file, plist_content)
-        .map_err(|e| format!("Failed to write plist file: {}", e))?;
-
-    Ok(format!(
-        "LaunchAgent plist created\n\nPlist file: {}\nSecret file: {}\n\nStart: adi cocoon start cocoon\nStatus: adi cocoon status cocoon\nLogs: adi cocoon logs cocoon",
-        plist_file, secret_file
-    ))
-}
-
-pub fn service_start() -> Result<String, String> {
+pub fn service_start() -> std::result::Result<String, String> {
     let manager = RuntimeManager::new();
     let runtime = manager.get_runtime(RuntimeType::Machine);
     runtime.start("cocoon")
@@ -296,7 +223,7 @@ fn create_docker_cocoon(
     signaling_url: &str,
     setup_token: Option<&str>,
     cocoon_secret: Option<&str>,
-) -> Result<String, String> {
+) -> std::result::Result<String, String> {
     let mut docker_cmd = std::process::Command::new("docker");
     docker_cmd
         .arg("run")
@@ -455,22 +382,17 @@ impl Default for CocoonPlugin {
 #[async_trait]
 impl Plugin for CocoonPlugin {
     fn metadata(&self) -> PluginMetadata {
-        PluginMetadata {
-            id: "adi.cocoon".to_string(),
-            name: "Cocoon".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            plugin_type: PluginType::Core,
-            author: Some("ADI Team".to_string()),
-            description: Some("Remote containerized worker with PTY support".to_string()),
-            category: None,
-        }
+        PluginMetadata::new("adi.cocoon", "Cocoon", env!("CARGO_PKG_VERSION"))
+            .with_type(PluginType::Core)
+            .with_author("ADI Team")
+            .with_description("Remote containerized worker with PTY support")
     }
 
-    async fn init(&mut self, _ctx: &PluginContext) -> PluginResult<()> {
+    async fn init(&mut self, _ctx: &PluginContext) -> Result<()> {
         Ok(())
     }
 
-    async fn shutdown(&self) -> PluginResult<()> {
+    async fn shutdown(&self) -> Result<()> {
         Ok(())
     }
 
@@ -483,559 +405,381 @@ impl Plugin for CocoonPlugin {
 impl CliCommands for CocoonPlugin {
     async fn list_commands(&self) -> Vec<CliCommand> {
         vec![
-            CliCommand {
-                name: "".to_string(),
-                description: "Interactive mode (default)".to_string(),
-                usage: "".to_string(),
-                has_subcommands: false,
-            },
-            CliCommand {
-                name: "list".to_string(),
-                description: "List all cocoons".to_string(),
-                usage: "list".to_string(),
-                has_subcommands: false,
-            },
-            CliCommand {
-                name: "status".to_string(),
-                description: "Show cocoon status".to_string(),
-                usage: "status <name>".to_string(),
-                has_subcommands: false,
-            },
-            CliCommand {
-                name: "start".to_string(),
-                description: "Start a cocoon".to_string(),
-                usage: "start <name>".to_string(),
-                has_subcommands: false,
-            },
-            CliCommand {
-                name: "stop".to_string(),
-                description: "Stop a cocoon".to_string(),
-                usage: "stop <name>".to_string(),
-                has_subcommands: false,
-            },
-            CliCommand {
-                name: "restart".to_string(),
-                description: "Restart a cocoon".to_string(),
-                usage: "restart <name>".to_string(),
-                has_subcommands: false,
-            },
-            CliCommand {
-                name: "logs".to_string(),
-                description: "View cocoon logs".to_string(),
-                usage: "logs <name> [-f]".to_string(),
-                has_subcommands: false,
-            },
-            CliCommand {
-                name: "rm".to_string(),
-                description: "Remove a cocoon".to_string(),
-                usage: "rm <name> [--force]".to_string(),
-                has_subcommands: false,
-            },
-            CliCommand {
-                name: "create".to_string(),
-                description: "Create a new cocoon".to_string(),
-                usage: "create [--runtime docker|machine] [--name NAME] [--url URL]".to_string(),
-                has_subcommands: false,
-            },
-            CliCommand {
-                name: "run".to_string(),
-                description: "Run cocoon natively in foreground".to_string(),
-                usage: "run".to_string(),
-                has_subcommands: false,
-            },
-            CliCommand {
-                name: "setup".to_string(),
-                description: "Start pairing server for browser setup".to_string(),
-                usage: "setup [--port PORT]".to_string(),
-                has_subcommands: false,
-            },
-            CliCommand {
-                name: "check-update".to_string(),
-                description: "Check for available updates".to_string(),
-                usage: "check-update [name]".to_string(),
-                has_subcommands: false,
-            },
-            CliCommand {
-                name: "update".to_string(),
-                description: "Update cocoon to latest version".to_string(),
-                usage: "update [name] [--all]".to_string(),
-                has_subcommands: false,
-            },
-            CliCommand {
-                name: "version".to_string(),
-                description: "Show current version".to_string(),
-                usage: "version".to_string(),
-                has_subcommands: false,
-            },
+            Self::__sdk_cmd_meta_list(),
+            Self::__sdk_cmd_meta_status(),
+            Self::__sdk_cmd_meta_start(),
+            Self::__sdk_cmd_meta_stop(),
+            Self::__sdk_cmd_meta_restart(),
+            Self::__sdk_cmd_meta_logs(),
+            Self::__sdk_cmd_meta_rm(),
+            Self::__sdk_cmd_meta_create(),
+            Self::__sdk_cmd_meta_run_native(),
+            Self::__sdk_cmd_meta_setup_pairing(),
+            Self::__sdk_cmd_meta_check_update(),
+            Self::__sdk_cmd_meta_update(),
+            Self::__sdk_cmd_meta_version(),
         ]
     }
 
-    async fn run_command(&self, ctx: &CliContext) -> PluginResult<CliResult> {
-        let subcommand = ctx.subcommand.as_deref().unwrap_or("");
-        let args: Vec<String> = ctx.args.clone();
-        let manager = RuntimeManager::new();
-
-        let result = match subcommand {
-            // Interactive mode (no args or explicit "interactive")
-            "" | "interactive" | "i" => {
+    async fn run_command(&self, ctx: &CliContext) -> Result<CliResult> {
+        match ctx.subcommand.as_deref() {
+            Some("list") | Some("ls") | Some("ps") => self.__sdk_cmd_handler_list(ctx).await,
+            Some("status") => self.__sdk_cmd_handler_status(ctx).await,
+            Some("start") => self.__sdk_cmd_handler_start(ctx).await,
+            Some("stop") => self.__sdk_cmd_handler_stop(ctx).await,
+            Some("restart") => self.__sdk_cmd_handler_restart(ctx).await,
+            Some("logs") => self.__sdk_cmd_handler_logs(ctx).await,
+            Some("rm") | Some("remove") => self.__sdk_cmd_handler_rm(ctx).await,
+            Some("create") | Some("new") => self.__sdk_cmd_handler_create(ctx).await,
+            Some("run") => self.__sdk_cmd_handler_run_native(ctx).await,
+            Some("setup") => self.__sdk_cmd_handler_setup_pairing(ctx).await,
+            Some("check-update") | Some("check") => self.__sdk_cmd_handler_check_update(ctx).await,
+            Some("update") | Some("upgrade") | Some("self-update") => {
+                self.__sdk_cmd_handler_update(ctx).await
+            }
+            Some("version") | Some("-v") | Some("-V") | Some("--version") => {
+                self.__sdk_cmd_handler_version(ctx).await
+            }
+            Some("help") | Some("-h") | Some("--help") => {
+                Ok(CliResult::success(get_help_text().to_string()))
+            }
+            Some("") | Some("interactive") | Some("i") | None => {
+                let manager = RuntimeManager::new();
                 if let Err(e) = interactive::run_interactive(&manager) {
                     return Ok(CliResult::error(e));
                 }
-                Ok("Interactive mode exited".to_string())
+                Ok(CliResult::success("Interactive mode exited".to_string()))
             }
-
-            // List all cocoons
-            "list" | "ls" | "ps" => {
-                if let Err(e) = interactive::handle_list(&manager) {
-                    return Ok(CliResult::error(e));
-                }
-                Ok("Listed cocoons".to_string())
-            }
-
-            // Status of a specific cocoon
-            "status" => {
-                let name = args.first().map(|s| s.as_str());
-
-                if let Some(name) = name {
-                    match manager.find_cocoon(name) {
-                        Some((_, runtime_type)) => {
-                            let runtime = manager.get_runtime(runtime_type);
-                            match runtime.status(name) {
-                                Ok(info) => {
-                                    let reset = "\x1b[0m";
-                                    println!("\nCocoon: {}", info.name);
-                                    println!("Runtime: {}", info.runtime);
-                                    println!(
-                                        "Status: {}{}{}{}",
-                                        info.status_color(),
-                                        info.status_icon(),
-                                        info.status,
-                                        reset
-                                    );
-                                    if let Some(image) = &info.image {
-                                        println!("Image: {}", image);
-                                    }
-                                    if let Some(created) = &info.created {
-                                        println!("Created: {}", created);
-                                    }
-                                    println!();
-                                    Ok(format!("Status: {}", info.status))
-                                }
-                                Err(e) => Err(e),
-                            }
-                        }
-                        None => Err(format!("Cocoon '{}' not found", name)),
-                    }
-                } else {
-                    // Interactive selection
-                    if let Err(e) = interactive::run_interactive(&manager) {
-                        return Ok(CliResult::error(e));
-                    }
-                    Ok("Done".to_string())
-                }
-            }
-
-            // Start a cocoon
-            "start" => {
-                let name = args.first().map(|s| s.as_str());
-
-                if let Some(name) = name {
-                    match manager.find_cocoon(name) {
-                        Some((_, runtime_type)) => {
-                            let runtime = manager.get_runtime(runtime_type);
-                            println!("Starting '{}'...", name);
-                            runtime.start(name)
-                        }
-                        None => Err(format!(
-                            "Cocoon '{}' not found. Use 'adi cocoon list' to see available cocoons.",
-                            name
-                        )),
-                    }
-                } else {
-                    // Interactive selection
-                    if let Err(e) = interactive::run_interactive(&manager) {
-                        return Ok(CliResult::error(e));
-                    }
-                    Ok("Done".to_string())
-                }
-            }
-
-            // Stop a cocoon
-            "stop" => {
-                let name = args.first().map(|s| s.as_str());
-
-                if let Some(name) = name {
-                    match manager.find_cocoon(name) {
-                        Some((_, runtime_type)) => {
-                            let runtime = manager.get_runtime(runtime_type);
-                            println!("Stopping '{}'...", name);
-                            runtime.stop(name)
-                        }
-                        None => Err(format!("Cocoon '{}' not found", name)),
-                    }
-                } else {
-                    if let Err(e) = interactive::run_interactive(&manager) {
-                        return Ok(CliResult::error(e));
-                    }
-                    Ok("Done".to_string())
-                }
-            }
-
-            // Restart a cocoon
-            "restart" => {
-                let name = args.first().map(|s| s.as_str());
-
-                if let Some(name) = name {
-                    match manager.find_cocoon(name) {
-                        Some((_, runtime_type)) => {
-                            let runtime = manager.get_runtime(runtime_type);
-                            println!("Restarting '{}'...", name);
-                            runtime.restart(name)
-                        }
-                        None => Err(format!("Cocoon '{}' not found", name)),
-                    }
-                } else {
-                    if let Err(e) = interactive::run_interactive(&manager) {
-                        return Ok(CliResult::error(e));
-                    }
-                    Ok("Done".to_string())
-                }
-            }
-
-            // View logs
-            "logs" => {
-                let name = args.first().map(|s| s.as_str());
-                let follow = args.iter().any(|a| a == "-f" || a == "--follow");
-                let tail = args
-                    .iter()
-                    .position(|arg| arg == "--tail")
-                    .and_then(|idx| args.get(idx + 1))
-                    .and_then(|s| s.parse().ok());
-
-                if let Some(name) = name {
-                    match manager.find_cocoon(name) {
-                        Some((_, runtime_type)) => {
-                            let runtime = manager.get_runtime(runtime_type);
-                            match runtime.logs(name, follow, tail) {
-                                Ok(()) => Ok("Logs displayed".to_string()),
-                                Err(e) => Err(e),
-                            }
-                        }
-                        None => Err(format!("Cocoon '{}' not found", name)),
-                    }
-                } else {
-                    if let Err(e) = interactive::run_interactive(&manager) {
-                        return Ok(CliResult::error(e));
-                    }
-                    Ok("Done".to_string())
-                }
-            }
-
-            // Remove a cocoon
-            "rm" | "remove" => {
-                let name = args.first().map(|s| s.as_str());
-                let force = args.iter().any(|a| a == "-f" || a == "--force");
-
-                if let Some(name) = name {
-                    match manager.find_cocoon(name) {
-                        Some((_, runtime_type)) => {
-                            let runtime = manager.get_runtime(runtime_type);
-                            println!("Removing '{}'...", name);
-                            runtime.remove(name, force)
-                        }
-                        None => Err(format!("Cocoon '{}' not found", name)),
-                    }
-                } else {
-                    if let Err(e) = interactive::run_interactive(&manager) {
-                        return Ok(CliResult::error(e));
-                    }
-                    Ok("Done".to_string())
-                }
-            }
-
-            // Create a new cocoon
-            "create" | "new" => {
-                let runtime_arg = args
-                    .iter()
-                    .position(|arg| arg == "--runtime" || arg == "-r")
-                    .and_then(|idx| args.get(idx + 1))
-                    .map(|s| s.as_str());
-
-                if let Some(runtime_str) = runtime_arg {
-                    // Non-interactive create with runtime specified
-                    let runtime_type = RuntimeType::from_str(runtime_str).ok_or_else(|| {
-                        format!(
-                            "Invalid runtime '{}'. Use 'docker' or 'machine'.",
-                            runtime_str
-                        )
-                    });
-
-                    match runtime_type {
-                        Ok(RuntimeType::Docker) => {
-                            let name = args
-                                .iter()
-                                .position(|arg| arg == "--name")
-                                .and_then(|idx| args.get(idx + 1))
-                                .map(|s| s.to_string())
-                                .unwrap_or_else(generate_container_name);
-
-                            let signaling_url = args
-                                .iter()
-                                .position(|arg| arg == "--url")
-                                .and_then(|idx| args.get(idx + 1))
-                                .map(|s| s.to_string())
-                                .or_else(|| env_opt(EnvVar::SignalingServerUrl.as_str()))
-                                .unwrap_or_else(|| "ws://localhost:8080/ws".to_string());
-
-                            let setup_token = args
-                                .iter()
-                                .position(|arg| arg == "--token")
-                                .and_then(|idx| args.get(idx + 1))
-                                .map(|s| s.to_string())
-                                .or_else(|| env_opt(EnvVar::CocoonSetupToken.as_str()));
-
-                            let cocoon_secret = args
-                                .iter()
-                                .position(|arg| arg == "--secret")
-                                .and_then(|idx| args.get(idx + 1))
-                                .map(|s| s.to_string())
-                                .or_else(|| env_opt(EnvVar::CocoonSecret.as_str()));
-
-                            create_docker_cocoon(
-                                &name,
-                                &signaling_url,
-                                setup_token.as_deref(),
-                                cocoon_secret.as_deref(),
-                            )
-                        }
-                        Ok(RuntimeType::Machine) => {
-                            // Stop existing service first (ignore errors - may not be running)
-                            let runtime = manager.get_runtime(RuntimeType::Machine);
-                            let _ = runtime.stop("cocoon");
-
-                            match service_install() {
-                                Ok(msg) => {
-                                    println!("{}", msg);
-                                    if args.iter().any(|a| a == "--start") {
-                                        match service_start() {
-                                            Ok(start_msg) => println!("{}", start_msg),
-                                            Err(e) => {
-                                                println!("Warning: Failed to start service: {}", e)
-                                            }
-                                        }
-                                    }
-                                    Ok("Machine cocoon created".to_string())
-                                }
-                                Err(e) => Err(e),
-                            }
-                        }
-                        Err(e) => Err(e),
-                    }
-                } else {
-                    // Interactive create
-                    if let Err(e) = interactive::run_interactive(&manager) {
-                        return Ok(CliResult::error(e));
-                    }
-                    Ok("Done".to_string())
-                }
-            }
-
-            // Run natively in foreground (blocking - for use by launchd/systemd)
-            "run" => {
-                let rt = match tokio::runtime::Runtime::new() {
-                    Ok(rt) => rt,
-                    Err(e) => {
-                        return Ok(CliResult::error(format!("Failed to create runtime: {}", e)));
-                    }
-                };
-
-                rt.block_on(async {
-                    if let Err(e) = core::run().await {
-                        eprintln!("Cocoon error: {}", e);
-                    }
-                });
-
-                Ok("Cocoon stopped".to_string())
-            }
-
-            // Browser pairing setup
-            "setup" => {
-                let port = args
-                    .iter()
-                    .position(|arg| arg == "--port" || arg == "-p")
-                    .and_then(|idx| args.get(idx + 1))
-                    .and_then(|s| s.parse::<u16>().ok())
-                    .unwrap_or(14730);
-
-                let rt = match tokio::runtime::Runtime::new() {
-                    Ok(rt) => rt,
-                    Err(e) => {
-                        return Ok(CliResult::error(format!("Failed to create runtime: {}", e)));
-                    }
-                };
-
-                rt.block_on(async {
-                    setup::run_setup(port).await
-                })
-            }
-
-            // Check for updates
-            "check-update" | "check" => {
-                let name = args.first().map(|s| s.as_str());
-
-                if let Some(name) = name {
-                    // Check specific cocoon
-                    match manager.find_cocoon(name) {
-                        Some((_, runtime_type)) => {
-                            let runtime = manager.get_runtime(runtime_type);
-                            match runtime.check_update(name) {
-                                Ok(msg) => {
-                                    println!("{}", msg);
-                                    Ok(msg)
-                                }
-                                Err(e) => Err(e),
-                            }
-                        }
-                        None => Err(format!(
-                            "Cocoon '{}' not found. Use 'adi cocoon list' to see available cocoons.",
-                            name
-                        )),
-                    }
-                } else {
-                    // Check all cocoons
-                    match manager.list_all() {
-                        Ok(cocoons) if cocoons.is_empty() => {
-                            println!("No cocoons found. Create one with: adi cocoon create");
-                            Ok("No cocoons found".to_string())
-                        }
-                        Ok(cocoons) => {
-                            let mut results = Vec::new();
-                            for info in cocoons {
-                                let runtime = manager.get_runtime(info.runtime);
-                                println!("--- {} ({}) ---", info.name, info.runtime);
-                                match runtime.check_update(&info.name) {
-                                    Ok(msg) => {
-                                        println!("{}", msg);
-                                        results.push(format!("{}: OK", info.name));
-                                    }
-                                    Err(e) => {
-                                        println!("Error: {}\n", e);
-                                        results.push(format!("{}: Error", info.name));
-                                    }
-                                }
-                            }
-                            Ok(results.join(", "))
-                        }
-                        Err(e) => Err(e),
-                    }
-                }
-            }
-
-            // Perform update on a cocoon
-            "update" | "upgrade" | "self-update" => {
-                let name = args.first().map(|s| s.as_str());
-
-                if let Some(name) = name {
-                    // Update specific cocoon
-                    match manager.find_cocoon(name) {
-                        Some((_, runtime_type)) => {
-                            let runtime = manager.get_runtime(runtime_type);
-                            match runtime.update(name) {
-                                Ok(msg) => {
-                                    println!("{}", msg);
-                                    Ok(msg)
-                                }
-                                Err(e) => Err(e),
-                            }
-                        }
-                        None => Err(format!(
-                            "Cocoon '{}' not found. Use 'adi cocoon list' to see available cocoons.",
-                            name
-                        )),
-                    }
-                } else {
-                    // Interactive selection or update all
-                    let all_flag = args.iter().any(|a| a == "--all" || a == "-a");
-
-                    if all_flag {
-                        // Update all cocoons
-                        match manager.list_all() {
-                            Ok(cocoons) if cocoons.is_empty() => {
-                                println!("No cocoons found. Create one with: adi cocoon create");
-                                Ok("No cocoons found".to_string())
-                            }
-                            Ok(cocoons) => {
-                                let mut results = Vec::new();
-                                for info in cocoons {
-                                    let runtime = manager.get_runtime(info.runtime);
-                                    println!(
-                                        "\n=== Updating {} ({}) ===\n",
-                                        info.name, info.runtime
-                                    );
-                                    match runtime.update(&info.name) {
-                                        Ok(msg) => {
-                                            println!("{}", msg);
-                                            results.push(format!("{}: Updated", info.name));
-                                        }
-                                        Err(e) => {
-                                            println!("Error: {}", e);
-                                            results.push(format!("{}: Failed", info.name));
-                                        }
-                                    }
-                                }
-                                println!("\n=== Update Summary ===");
-                                for r in &results {
-                                    println!("  {}", r);
-                                }
-                                Ok(results.join(", "))
-                            }
-                            Err(e) => Err(e),
-                        }
-                    } else {
-                        // Interactive mode
-                        if let Err(e) = interactive::run_interactive(&manager) {
-                            return Ok(CliResult::error(e));
-                        }
-                        Ok("Done".to_string())
-                    }
-                }
-            }
-
-            // Show version
-            "version" | "-v" | "-V" | "--version" => {
-                let version = env!("CARGO_PKG_VERSION");
-                println!("cocoon {}", version);
-                Ok(format!("cocoon {}", version))
-            }
-
-            // Help
-            "help" | "-h" | "--help" => Ok(get_help_text().to_string()),
-
-            // Unknown command
-            _ => {
-                println!("Unknown command: {}", subcommand);
-                println!("Run 'adi cocoon help' for usage information.");
-                Err(format!("Unknown command: {}", subcommand))
-            }
-        };
-
-        match result {
-            Ok(output) => Ok(CliResult::success(output)),
-            Err(e) => Ok(CliResult::error(e)),
+            Some(cmd) => Ok(CliResult::error(format!(
+                "Unknown command: {}. Run 'adi cocoon help' for usage information.",
+                cmd
+            ))),
         }
     }
 }
 
-lib_plugin_abi_v3::export_abi_version!();
+// === Command Handlers ===
 
-/// Create the plugin instance (v3 entry point)
-#[no_mangle]
-pub fn plugin_create() -> Box<dyn Plugin> {
-    Box::new(CocoonPlugin::new())
+impl CocoonPlugin {
+    #[command(name = "list", description = "List all cocoons")]
+    async fn list(&self) -> CmdResult {
+        let manager = RuntimeManager::new();
+        interactive::handle_list(&manager).map_err(|e| e)?;
+        Ok("Listed cocoons".to_string())
+    }
+
+    #[command(name = "status", description = "Show cocoon status")]
+    async fn status(&self, args: NameArg) -> CmdResult {
+        let manager = RuntimeManager::new();
+        if let Some(name) = args.name {
+            match manager.find_cocoon(&name) {
+                Some((_, runtime_type)) => {
+                    let runtime = manager.get_runtime(runtime_type);
+                    match runtime.status(&name) {
+                        Ok(info) => {
+                            let reset = "\x1b[0m";
+                            println!("\nCocoon: {}", info.name);
+                            println!("Runtime: {}", info.runtime);
+                            println!(
+                                "Status: {}{}{}{}",
+                                info.status_color(),
+                                info.status_icon(),
+                                info.status,
+                                reset
+                            );
+                            if let Some(image) = &info.image {
+                                println!("Image: {}", image);
+                            }
+                            if let Some(created) = &info.created {
+                                println!("Created: {}", created);
+                            }
+                            println!();
+                            Ok(format!("Status: {}", info.status))
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+                None => Err(format!("Cocoon '{}' not found", name)),
+            }
+        } else {
+            interactive::run_interactive(&manager).map_err(|e| e)?;
+            Ok("Done".to_string())
+        }
+    }
+
+    #[command(name = "start", description = "Start a stopped cocoon")]
+    async fn start(&self, args: NameArg) -> CmdResult {
+        let manager = RuntimeManager::new();
+        if let Some(name) = args.name {
+            match manager.find_cocoon(&name) {
+                Some((_, runtime_type)) => {
+                    let runtime = manager.get_runtime(runtime_type);
+                    println!("Starting '{}'...", name);
+                    runtime.start(&name)
+                }
+                None => Err(format!(
+                    "Cocoon '{}' not found. Use 'adi cocoon list' to see available cocoons.",
+                    name
+                )),
+            }
+        } else {
+            interactive::run_interactive(&manager).map_err(|e| e)?;
+            Ok("Done".to_string())
+        }
+    }
+
+    #[command(name = "stop", description = "Stop a running cocoon")]
+    async fn stop(&self, args: NameArg) -> CmdResult {
+        let manager = RuntimeManager::new();
+        if let Some(name) = args.name {
+            match manager.find_cocoon(&name) {
+                Some((_, runtime_type)) => {
+                    let runtime = manager.get_runtime(runtime_type);
+                    println!("Stopping '{}'...", name);
+                    runtime.stop(&name)
+                }
+                None => Err(format!("Cocoon '{}' not found", name)),
+            }
+        } else {
+            interactive::run_interactive(&manager).map_err(|e| e)?;
+            Ok("Done".to_string())
+        }
+    }
+
+    #[command(name = "restart", description = "Restart a cocoon")]
+    async fn restart(&self, args: NameArg) -> CmdResult {
+        let manager = RuntimeManager::new();
+        if let Some(name) = args.name {
+            match manager.find_cocoon(&name) {
+                Some((_, runtime_type)) => {
+                    let runtime = manager.get_runtime(runtime_type);
+                    println!("Restarting '{}'...", name);
+                    runtime.restart(&name)
+                }
+                None => Err(format!("Cocoon '{}' not found", name)),
+            }
+        } else {
+            interactive::run_interactive(&manager).map_err(|e| e)?;
+            Ok("Done".to_string())
+        }
+    }
+
+    #[command(name = "logs", description = "View cocoon logs")]
+    async fn logs(&self, args: LogsArgs) -> CmdResult {
+        let manager = RuntimeManager::new();
+        if let Some(name) = args.name {
+            match manager.find_cocoon(&name) {
+                Some((_, runtime_type)) => {
+                    let runtime = manager.get_runtime(runtime_type);
+                    runtime.logs(&name, args.follow, args.tail).map_err(|e| e)?;
+                    Ok("Logs displayed".to_string())
+                }
+                None => Err(format!("Cocoon '{}' not found", name)),
+            }
+        } else {
+            interactive::run_interactive(&manager).map_err(|e| e)?;
+            Ok("Done".to_string())
+        }
+    }
+
+    #[command(name = "rm", description = "Remove a cocoon")]
+    async fn rm(&self, args: RmArgs) -> CmdResult {
+        let manager = RuntimeManager::new();
+        if let Some(name) = args.name {
+            match manager.find_cocoon(&name) {
+                Some((_, runtime_type)) => {
+                    let runtime = manager.get_runtime(runtime_type);
+                    println!("Removing '{}'...", name);
+                    runtime.remove(&name, args.force)
+                }
+                None => Err(format!("Cocoon '{}' not found", name)),
+            }
+        } else {
+            interactive::run_interactive(&manager).map_err(|e| e)?;
+            Ok("Done".to_string())
+        }
+    }
+
+    #[command(name = "create", description = "Create a new cocoon")]
+    async fn create(&self, args: CreateArgs) -> CmdResult {
+        let manager = RuntimeManager::new();
+        if let Some(runtime_str) = args.runtime {
+            let runtime_type = RuntimeType::from_str(&runtime_str).ok_or_else(|| {
+                format!(
+                    "Invalid runtime '{}'. Use 'docker' or 'machine'.",
+                    runtime_str
+                )
+            })?;
+            match runtime_type {
+                RuntimeType::Docker => {
+                    let name = args.name.unwrap_or_else(generate_container_name);
+                    let signaling_url = args
+                        .url
+                        .or_else(|| env_opt(EnvVar::SignalingServerUrl.as_str()))
+                        .unwrap_or_else(|| "ws://localhost:8080/ws".to_string());
+                    let setup_token =
+                        args.token.or_else(|| env_opt(EnvVar::CocoonSetupToken.as_str()));
+                    let cocoon_secret =
+                        args.secret.or_else(|| env_opt(EnvVar::CocoonSecret.as_str()));
+                    create_docker_cocoon(
+                        &name,
+                        &signaling_url,
+                        setup_token.as_deref(),
+                        cocoon_secret.as_deref(),
+                    )
+                }
+                RuntimeType::Machine => {
+                    let runtime = manager.get_runtime(RuntimeType::Machine);
+                    let _ = runtime.stop("cocoon");
+                    match service_install() {
+                        Ok(msg) => {
+                            println!("{}", msg);
+                            if args.start {
+                                match service_start() {
+                                    Ok(start_msg) => println!("{}", start_msg),
+                                    Err(e) => println!("Warning: Failed to start service: {}", e),
+                                }
+                            }
+                            Ok("Machine cocoon created".to_string())
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+            }
+        } else {
+            interactive::run_interactive(&manager).map_err(|e| e)?;
+            Ok("Done".to_string())
+        }
+    }
+
+    #[command(name = "run", description = "Run cocoon natively in foreground")]
+    async fn run_native(&self) -> CmdResult {
+        if let Err(e) = core::run().await {
+            eprintln!("Cocoon error: {}", e);
+        }
+        Ok("Cocoon stopped".to_string())
+    }
+
+    #[command(name = "setup", description = "Start pairing server for browser setup")]
+    async fn setup_pairing(&self, args: SetupArgs) -> CmdResult {
+        let port = args.port.unwrap_or(14730);
+        setup::run_setup(port).await
+    }
+
+    #[command(name = "check-update", description = "Check for available updates")]
+    async fn check_update(&self, args: CheckUpdateArgs) -> CmdResult {
+        let manager = RuntimeManager::new();
+        if let Some(name) = args.name {
+            match manager.find_cocoon(&name) {
+                Some((_, runtime_type)) => {
+                    let runtime = manager.get_runtime(runtime_type);
+                    match runtime.check_update(&name) {
+                        Ok(msg) => {
+                            println!("{}", msg);
+                            Ok(msg)
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+                None => Err(format!(
+                    "Cocoon '{}' not found. Use 'adi cocoon list' to see available cocoons.",
+                    name
+                )),
+            }
+        } else {
+            match manager.list_all() {
+                Ok(cocoons) if cocoons.is_empty() => {
+                    println!("No cocoons found. Create one with: adi cocoon create");
+                    Ok("No cocoons found".to_string())
+                }
+                Ok(cocoons) => {
+                    let mut results = Vec::new();
+                    for info in cocoons {
+                        let runtime = manager.get_runtime(info.runtime);
+                        println!("--- {} ({}) ---", info.name, info.runtime);
+                        match runtime.check_update(&info.name) {
+                            Ok(msg) => {
+                                println!("{}", msg);
+                                results.push(format!("{}: OK", info.name));
+                            }
+                            Err(e) => {
+                                println!("Error: {}\n", e);
+                                results.push(format!("{}: Error", info.name));
+                            }
+                        }
+                    }
+                    Ok(results.join(", "))
+                }
+                Err(e) => Err(e),
+            }
+        }
+    }
+
+    #[command(name = "update", description = "Update cocoon to latest version")]
+    async fn update(&self, args: UpdateArgs) -> CmdResult {
+        let manager = RuntimeManager::new();
+        if let Some(name) = args.name {
+            match manager.find_cocoon(&name) {
+                Some((_, runtime_type)) => {
+                    let runtime = manager.get_runtime(runtime_type);
+                    match runtime.update(&name) {
+                        Ok(msg) => {
+                            println!("{}", msg);
+                            Ok(msg)
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+                None => Err(format!(
+                    "Cocoon '{}' not found. Use 'adi cocoon list' to see available cocoons.",
+                    name
+                )),
+            }
+        } else if args.all {
+            match manager.list_all() {
+                Ok(cocoons) if cocoons.is_empty() => {
+                    println!("No cocoons found. Create one with: adi cocoon create");
+                    Ok("No cocoons found".to_string())
+                }
+                Ok(cocoons) => {
+                    let mut results = Vec::new();
+                    for info in cocoons {
+                        let runtime = manager.get_runtime(info.runtime);
+                        println!("\n=== Updating {} ({}) ===\n", info.name, info.runtime);
+                        match runtime.update(&info.name) {
+                            Ok(msg) => {
+                                println!("{}", msg);
+                                results.push(format!("{}: Updated", info.name));
+                            }
+                            Err(e) => {
+                                println!("Error: {}", e);
+                                results.push(format!("{}: Failed", info.name));
+                            }
+                        }
+                    }
+                    println!("\n=== Update Summary ===");
+                    for r in &results {
+                        println!("  {}", r);
+                    }
+                    Ok(results.join(", "))
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            interactive::run_interactive(&manager).map_err(|e| e)?;
+            Ok("Done".to_string())
+        }
+    }
+
+    #[command(name = "version", description = "Show current version")]
+    async fn version(&self) -> CmdResult {
+        let version = env!("CARGO_PKG_VERSION");
+        println!("cocoon {}", version);
+        Ok(format!("cocoon {}", version))
+    }
 }
 
-/// Create the CLI commands interface
 #[no_mangle]
-pub fn plugin_create_cli() -> Box<dyn CliCommands> {
+pub fn plugin_create() -> Box<dyn Plugin> {
     Box::new(CocoonPlugin::new())
 }

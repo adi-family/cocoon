@@ -20,14 +20,17 @@ standalone = []
 services = ["tasks-core"]
 
 [dependencies]
-# Plugin ABI
-lib-plugin-abi-v3 = { path = "../lib/lib-plugin-abi-v3" }
+# Plugin SDK - one import for everything
+lib-plugin-prelude = { path = "../lib/lib-plugin-prelude" }
 
 # Interactive CLI
 inquire = "0.7"
 
 # Environment
 lib-env-parse = { path = "../lib/lib-env-parse" }
+
+# Daemon management
+lib-daemon-core = { path = "../lib/lib-daemon-core" }
 
 # Core dependencies
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "fs", "process", "io-util", "sync", "signal"] }
