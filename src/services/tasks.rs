@@ -65,7 +65,7 @@ impl TasksService {
     /// Helper to convert Task to JSON with consistent schema
     fn task_to_json(task: &Task) -> JsonValue {
         json!({
-            "id": task.id.0,
+            "id": task.id.get(),
             "title": task.title,
             "description": task.description,
             "status": task.status.to_string(),
@@ -109,7 +109,7 @@ impl TasksService {
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter()
-                    .filter_map(|v| v.as_i64().map(TaskId))
+                    .filter_map(|v| v.as_i64().map(TaskId::new))
                     .collect()
             })
             .unwrap_or_default();
@@ -130,7 +130,7 @@ impl TasksService {
             self.broadcast_event("task_created", Self::task_to_json(&task));
         }
 
-        Ok(AdiHandleResult::Success(json!({ "task_id": task_id.0 })))
+        Ok(AdiHandleResult::Success(json!({ "task_id": task_id.get() })))
     }
 
     /// Handle get method
@@ -142,7 +142,7 @@ impl TasksService {
 
         let manager = self.manager.lock().await;
         let task_with_deps = manager
-            .get_task_with_dependencies(TaskId(task_id))
+            .get_task_with_dependencies(TaskId::new(task_id))
             .map_err(|e| AdiServiceError::not_found(e.to_string()))?;
 
         Ok(AdiHandleResult::Success(json!(task_with_deps)))
@@ -157,7 +157,7 @@ impl TasksService {
 
         let manager = self.manager.lock().await;
         let mut task = manager
-            .get_task(TaskId(task_id))
+            .get_task(TaskId::new(task_id))
             .map_err(|e| AdiServiceError::not_found(e.to_string()))?;
 
         let old_status = task.status;
@@ -210,10 +210,10 @@ impl TasksService {
         let manager = self.manager.lock().await;
         
         // Get task info before deleting for the event
-        let task_info = manager.get_task(TaskId(task_id)).ok();
-        
+        let task_info = manager.get_task(TaskId::new(task_id)).ok();
+
         manager
-            .delete_task(TaskId(task_id))
+            .delete_task(TaskId::new(task_id))
             .map_err(|e| AdiServiceError::internal(e.to_string()))?;
 
         // Broadcast delete event
@@ -292,7 +292,7 @@ impl TasksService {
 
         let manager = self.manager.lock().await;
         manager
-            .add_dependency(TaskId(from_id), TaskId(to_id))
+            .add_dependency(TaskId::new(from_id), TaskId::new(to_id))
             .map_err(|e| AdiServiceError::internal(e.to_string()))?;
 
         Ok(AdiHandleResult::Success(
@@ -317,7 +317,7 @@ impl TasksService {
 
         let manager = self.manager.lock().await;
         manager
-            .remove_dependency(TaskId(from_id), TaskId(to_id))
+            .remove_dependency(TaskId::new(from_id), TaskId::new(to_id))
             .map_err(|e| AdiServiceError::internal(e.to_string()))?;
 
         Ok(AdiHandleResult::Success(json!({ "removed": true })))
@@ -334,7 +334,7 @@ impl TasksService {
             .map_err(|e| AdiServiceError::internal(e.to_string()))?;
 
         // Convert Vec<Vec<TaskId>> to Vec<Vec<i64>> for JSON
-        let cycles: Vec<Vec<i64>> = cycles.into_iter().map(|c| c.into_iter().map(|id| id.0).collect()).collect();
+        let cycles: Vec<Vec<i64>> = cycles.into_iter().map(|c| c.into_iter().map(|id| id.get()).collect()).collect();
 
         Ok(AdiHandleResult::Success(json!({ "cycles": cycles })))
     }

@@ -19,7 +19,7 @@ pub use runtime::{CocoonInfo, CocoonStatus, Runtime, RuntimeManager, RuntimeType
 pub use silk::{AnsiToHtml, SilkSession};
 pub use webrtc::WebRtcManager;
 
-#[cfg(feature = "adi-tasks-core")]
+#[cfg(feature = "tasks-core")]
 pub use services::TasksService;
 
 use base64::Engine;

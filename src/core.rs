@@ -819,7 +819,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         let mut router = AdiRouter::new();
         
         // Register tasks service if enabled
-        #[cfg(feature = "adi-tasks-core")]
+        #[cfg(feature = "tasks-core")]
         {
             match crate::services::TasksService::new_global() {
                 Ok(tasks_service) => {
