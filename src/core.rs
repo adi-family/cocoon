@@ -832,6 +832,20 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         
+        // Register knowledgebase service if enabled
+        #[cfg(feature = "kb-core")]
+        {
+            match crate::services::KnowledgebaseService::new().await {
+                Ok(kb_service) => {
+                    router.register(std::sync::Arc::new(kb_service));
+                    tracing::info!("📦 Registered ADI service: knowledgebase");
+                }
+                Err(e) => {
+                    tracing::warn!("⚠️ Failed to initialize knowledgebase service: {}", e);
+                }
+            }
+        }
+
         // Register tools service (always available)
         let tools_service = crate::services::ToolsService::new();
         let tool_count = tools_service.list_all_tools().len();

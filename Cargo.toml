@@ -18,6 +18,7 @@ crate-type = ["cdylib", "rlib"]
 default = ["services"]
 standalone = []
 services = ["tasks-core"]
+kb-service = ["kb-core"]
 
 [dependencies]
 # Plugin SDK - one import for everything
@@ -44,6 +45,7 @@ async-trait = "0.1"
 
 # ADI services (optional, for embedded service support)
 tasks-core = { path = "../tasks/core", optional = true }
+kb-core = { package = "knowledgebase-core", path = "../knowledgebase/core", features = ["fastembed"], optional = true }
 base64 = "0.22"
 walkdir = "2"
 futures = "0.3"
