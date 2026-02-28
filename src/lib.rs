@@ -24,9 +24,98 @@ pub use webrtc::WebRtcManager;
 #[cfg(feature = "tasks-core")]
 pub use services::TasksService;
 
-use base64::Engine;
-use lib_console_output::{out_error, out_info, out_success, out_warn, theme, KeyValue, Renderable};
+use lib_console_output::{out_error, out_info, out_success, theme, KeyValue, Renderable};
 use lib_env_parse::{env_opt, env_vars};
+use once_cell::sync::OnceCell;
+
+static RUNTIME: OnceCell<tokio::runtime::Runtime> = OnceCell::new();
+
+pub(crate) fn get_runtime() -> &'static tokio::runtime::Runtime {
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create tokio runtime")
+    })
+}
+
+pub(crate) async fn ensure_daemon_running_async() -> std::result::Result<(), String> {
+    start_cocoon_daemon(&[]).await
+}
+
+/// Start the cocoon daemon service, optionally injecting extra env vars.
+///
+/// If the service is already running without extra env, it's left alone.
+/// If extra env is provided, an existing service is restarted with the new vars.
+pub(crate) async fn start_cocoon_daemon(
+    extra_env: &[(&str, &str)],
+) -> std::result::Result<(), String> {
+    let client = lib_daemon_client::DaemonClient::new();
+
+    client
+        .ensure_running()
+        .await
+        .map_err(|e| format!("Failed to start adi daemon: {}", e))?;
+
+    let services = client
+        .list_services()
+        .await
+        .map_err(|e| format!("Failed to list services: {}", e))?;
+
+    let running = services
+        .iter()
+        .any(|s| s.name == "adi.cocoon" && s.state.is_running());
+
+    // If extra env is provided and service is already running, restart it.
+    if running && !extra_env.is_empty() {
+        out_info!("Restarting cocoon service with new configuration...");
+        let _ = client.stop_service("adi.cocoon", false).await;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    } else if running {
+        return Ok(());
+    }
+
+    // Build config with extra env vars
+    let config = if extra_env.is_empty() {
+        None
+    } else {
+        let exe = std::env::current_exe()
+            .map_err(|e| format!("Failed to get exe path: {}", e))?;
+        let mut cfg = lib_daemon_client::ServiceConfig::new(exe.display().to_string())
+            .args(["daemon", "run-service", "adi.cocoon"])
+            .env("RUST_LOG", "trace");
+        for &(key, value) in extra_env {
+            cfg = cfg.env(key, value);
+        }
+        Some(cfg)
+    };
+
+    out_info!("Starting cocoon service...");
+    client
+        .start_service("adi.cocoon", config)
+        .await
+        .map_err(|e| format!("Failed to start cocoon service: {}", e))?;
+
+    for _ in 0..20 {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        if let Ok(svcs) = client.list_services().await {
+            if svcs
+                .iter()
+                .any(|s| s.name == "adi.cocoon" && s.state.is_running())
+            {
+                break;
+            }
+        }
+    }
+    out_success!("Cocoon service started");
+
+    Ok(())
+}
+
+/// Sync wrapper for callers not already inside a tokio runtime.
+pub(crate) fn ensure_daemon_running() -> std::result::Result<(), String> {
+    get_runtime().block_on(ensure_daemon_running_async())
+}
 
 env_vars! {
     SignalingServerUrl => "SIGNALING_SERVER_URL",
@@ -91,6 +180,8 @@ pub struct CreateArgs {
 pub struct SetupArgs {
     #[arg(long)]
     pub port: Option<u16>,
+    #[arg(long)]
+    pub url: Option<String>,
 }
 
 #[derive(CliArgs)]
@@ -108,86 +199,6 @@ pub struct UpdateArgs {
     pub all: bool,
 }
 
-// === Service Management Helpers ===
-
-fn get_binary_path() -> std::result::Result<std::path::PathBuf, String> {
-    std::env::current_exe().map_err(|e| format!("Failed to get current binary path: {}", e))
-}
-
-fn generate_secret() -> String {
-    use rand::Rng;
-    let mut rng = rand::rng();
-    let bytes: Vec<u8> = (0..36).map(|_| rng.random()).collect();
-    base64::engine::general_purpose::STANDARD.encode(&bytes)
-}
-
-pub fn service_install() -> std::result::Result<String, String> {
-    use lib_daemon_core::{get_service_manager, RestartPolicy, ServiceConfig};
-
-    let signaling_url = env_opt(EnvVar::SignalingServerUrl.as_str())
-        .ok_or_else(|| "SIGNALING_SERVER_URL environment variable not set".to_string())?;
-
-    let home_dir = env_opt(EnvVar::Home.as_str())
-        .ok_or_else(|| "HOME environment variable not set".to_string())?;
-
-    let config_dir = format!("{}/.config/cocoon", home_dir);
-    std::fs::create_dir_all(&config_dir)
-        .map_err(|e| format!("Failed to create config directory: {}", e))?;
-
-    let secret_file = format!("{}/secret", config_dir);
-    let secret = if std::path::Path::new(&secret_file).exists() {
-        std::fs::read_to_string(&secret_file)
-            .map_err(|e| format!("Failed to read secret: {}", e))?
-            .trim()
-            .to_string()
-    } else {
-        let new_secret = generate_secret();
-        std::fs::write(&secret_file, &new_secret)
-            .map_err(|e| format!("Failed to save secret: {}", e))?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&secret_file, std::fs::Permissions::from_mode(0o600))
-                .map_err(|e| format!("Failed to set secret permissions: {}", e))?;
-        }
-
-        new_secret
-    };
-
-    let binary_path = get_binary_path()?;
-
-    let mut config = ServiceConfig::new("cocoon", binary_path)
-        .description("Cocoon - Remote containerized worker")
-        .args(["cocoon", "run"])
-        .env("SIGNALING_SERVER_URL", &signaling_url)
-        .env("COCOON_SECRET", &secret)
-        .stdout_log("/tmp/cocoon.log")
-        .stderr_log("/tmp/cocoon.error.log")
-        .restart_policy(RestartPolicy::Always)
-        .autostart(true);
-
-    if let Some(token) = env_opt(EnvVar::CocoonSetupToken.as_str()) {
-        config = config.env("COCOON_SETUP_TOKEN", &token);
-    }
-
-    let manager = get_service_manager();
-    tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(manager.install(&config))
-    })
-    .map_err(|e| e.to_string())?;
-
-    Ok(format!(
-        "Service installed\n\nSecret file: {}\n\nStart: adi cocoon service start\nStatus: adi cocoon service status\nLogs: adi cocoon service logs",
-        secret_file
-    ))
-}
-
-pub fn service_start() -> std::result::Result<String, String> {
-    let manager = RuntimeManager::new();
-    let runtime = manager.get_runtime(RuntimeType::Machine);
-    runtime.start("cocoon")
-}
 
 /// Generate a unique container name
 fn generate_container_name() -> String {
@@ -410,7 +421,7 @@ impl CliCommands for CocoonPlugin {
         vec![
             Self::__sdk_cmd_meta_list(),
             Self::__sdk_cmd_meta_status(),
-            Self::__sdk_cmd_meta_start(),
+            Self::__sdk_cmd_meta_start_cocoon(),
             Self::__sdk_cmd_meta_stop(),
             Self::__sdk_cmd_meta_restart(),
             Self::__sdk_cmd_meta_logs(),
@@ -428,7 +439,7 @@ impl CliCommands for CocoonPlugin {
         match ctx.subcommand.as_deref() {
             Some("list") | Some("ls") | Some("ps") => self.__sdk_cmd_handler_list(ctx).await,
             Some("status") => self.__sdk_cmd_handler_status(ctx).await,
-            Some("start") => self.__sdk_cmd_handler_start(ctx).await,
+            Some("start") => self.__sdk_cmd_handler_start_cocoon(ctx).await,
             Some("stop") => self.__sdk_cmd_handler_stop(ctx).await,
             Some("restart") => self.__sdk_cmd_handler_restart(ctx).await,
             Some("logs") => self.__sdk_cmd_handler_logs(ctx).await,
@@ -497,9 +508,7 @@ impl CocoonPlugin {
                             if let Some(created) = &info.created {
                                 kv = kv.entry("Created", created);
                             }
-                            println!();
                             kv.print();
-                            println!();
                             Ok(format!("Status: {}", info.status))
                         }
                         Err(e) => Err(e),
@@ -514,7 +523,7 @@ impl CocoonPlugin {
     }
 
     #[command(name = "start", description = "Start a stopped cocoon")]
-    async fn start(&self, args: NameArg) -> CmdResult {
+    async fn start_cocoon(&self, args: NameArg) -> CmdResult {
         let manager = RuntimeManager::new();
         if let Some(name) = args.name {
             match manager.find_cocoon(&name) {
@@ -637,21 +646,9 @@ impl CocoonPlugin {
                     )
                 }
                 RuntimeType::Machine => {
-                    let runtime = manager.get_runtime(RuntimeType::Machine);
-                    let _ = runtime.stop("cocoon");
-                    match service_install() {
-                        Ok(msg) => {
-                            out_success!("{}", msg);
-                            if args.start {
-                                match service_start() {
-                                    Ok(start_msg) => out_success!("{}", start_msg),
-                                    Err(e) => out_warn!("Failed to start service: {}", e),
-                                }
-                            }
-                            Ok("Machine cocoon created".to_string())
-                        }
-                        Err(e) => Err(e),
-                    }
+                    ensure_daemon_running()?;
+                    out_success!("Cocoon service registered with ADI daemon");
+                    Ok("Machine cocoon created".to_string())
                 }
             }
         } else {
@@ -662,16 +659,21 @@ impl CocoonPlugin {
 
     #[command(name = "run", description = "Run cocoon natively in foreground")]
     async fn run_native(&self) -> CmdResult {
-        if let Err(e) = core::run().await {
-            out_error!("Cocoon error: {}", e);
-        }
-        Ok("Cocoon stopped".to_string())
+        run_with_runtime(async {
+            if let Err(e) = core::run().await {
+                out_error!("Cocoon error: {}", e);
+            }
+            Ok("Cocoon stopped".to_string())
+        })
     }
 
     #[command(name = "setup", description = "Start pairing server for browser setup")]
     async fn setup_pairing(&self, args: SetupArgs) -> CmdResult {
         let port = args.port.unwrap_or(14730);
-        setup::run_setup(port).await
+        let url = args.url;
+        run_with_runtime(async move {
+            setup::run_setup(port, url).await
+        })
     }
 
     #[command(name = "check-update", description = "Check for available updates")]
@@ -683,7 +685,7 @@ impl CocoonPlugin {
                     let runtime = manager.get_runtime(runtime_type);
                     match runtime.check_update(&name) {
                         Ok(msg) => {
-                            print!("{}", msg);
+                            out_info!("{}", msg);
                             Ok(msg)
                         }
                         Err(e) => Err(e),
@@ -707,7 +709,7 @@ impl CocoonPlugin {
                         out_info!("{} ({})", info.name, info.runtime);
                         match runtime.check_update(&info.name) {
                             Ok(msg) => {
-                                print!("{}", msg);
+                                out_info!("{}", msg);
                                 results.push(format!("{}: OK", info.name));
                             }
                             Err(e) => {
@@ -732,7 +734,7 @@ impl CocoonPlugin {
                     let runtime = manager.get_runtime(runtime_type);
                     match runtime.update(&name) {
                         Ok(msg) => {
-                            print!("{}", msg);
+                            out_info!("{}", msg);
                             Ok(msg)
                         }
                         Err(e) => Err(e),
@@ -756,7 +758,7 @@ impl CocoonPlugin {
                         out_info!("Updating {} ({})...", info.name, info.runtime);
                         match runtime.update(&info.name) {
                             Ok(msg) => {
-                                print!("{}", msg);
+                                out_info!("{}", msg);
                                 results.push(format!("{}: Updated", info.name));
                             }
                             Err(e) => {
@@ -787,7 +789,76 @@ impl CocoonPlugin {
     }
 }
 
+#[daemon_service]
+impl CocoonPlugin {
+    async fn start(&self, _ctx: DaemonContext) -> Result<()> {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "cocoon=info".into()),
+            )
+            .with_ansi(false)
+            .try_init();
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<std::result::Result<(), String>>();
+
+        std::thread::Builder::new()
+            .name("cocoon-daemon".into())
+            .spawn(move || {
+                let rt = match tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        let _ = tx.send(Err(format!("Failed to build Tokio runtime: {}", e)));
+                        return;
+                    }
+                };
+
+                let result = rt.block_on(async {
+                    core::run().await.map_err(|e| e.to_string())
+                });
+
+                let _ = tx.send(result);
+            })
+            .map_err(|e| anyhow::anyhow!("Failed to spawn daemon thread: {}", e))?;
+
+        rx.await
+            .map_err(|_| anyhow::anyhow!("Daemon thread terminated unexpectedly"))?
+            .map_err(|e| anyhow::anyhow!("{}", e).into())
+    }
+}
+
+/// Run an async block on a dedicated Tokio runtime.
+///
+/// Plugin cdylibs have their own copy of Tokio that doesn't share the host's
+/// reactor, so any async I/O (TCP listeners, spawned tasks, etc.) must run on
+/// a runtime owned by the plugin.
+fn run_with_runtime<F: std::future::Future<Output = CmdResult> + Send + 'static>(
+    fut: F,
+) -> CmdResult {
+    std::thread::spawn(move || {
+        tokio::runtime::Runtime::new()
+            .map_err(|e| format!("Failed to create runtime: {e}"))?
+            .block_on(fut)
+    })
+    .join()
+    .map_err(|_| "Async task panicked".to_string())?
+}
+
+/// ABI version for host compatibility check.
+#[no_mangle]
+pub extern "C" fn plugin_abi_version() -> u32 {
+    3
+}
+
 #[no_mangle]
 pub fn plugin_create() -> Box<dyn Plugin> {
+    Box::new(CocoonPlugin::new())
+}
+
+#[no_mangle]
+pub fn plugin_create_cli() -> Box<dyn CliCommands> {
     Box::new(CocoonPlugin::new())
 }

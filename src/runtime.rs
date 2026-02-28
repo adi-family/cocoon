@@ -3,10 +3,10 @@
 //! Supports Docker containers and Machine (native systemd/launchd) services.
 
 use crate::self_update;
-use lib_console_output::out_info;
+use lib_console_output::{out_info, KeyValue, Renderable};
 use std::fmt;
 
-use lib_daemon_core::{get_service_manager, ServiceStatus as DaemonServiceStatus, Platform};
+use lib_daemon_client::DaemonClient;
 
 /// Runtime type for a cocoon instance
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -350,38 +350,49 @@ impl Runtime for DockerRuntime {
 
         let (needs_update, details) = self_update::docker::check_for_updates("latest")?;
 
-        let mut output = String::new();
-        output.push_str(&format!("Cocoon: {}\n", name));
-        output.push_str(&format!("Runtime: Docker\n"));
-        output.push_str(&format!("Status: {}\n", info.status));
+        let mut kv = KeyValue::new()
+            .entry("Cocoon", name)
+            .entry("Runtime", "Docker")
+            .entry("Status", info.status.to_string());
         if let Some(ref image) = info.image {
-            output.push_str(&format!("Image: {}\n", image));
+            kv = kv.entry("Image", image);
         }
-        output.push_str(&format!("\n{}\n", details));
+        kv = kv.entry("Details", &details);
+        kv.print();
 
-        if needs_update {
-            output.push_str("\nRun 'adi cocoon update {}' to update.\n");
+        let hint = if needs_update {
+            format!("Run 'adi cocoon update {}' to update.", name)
         } else {
-            output.push_str("\nTip: Run 'adi cocoon update' to pull the latest image.\n");
-        }
+            "Tip: Run 'adi cocoon update' to pull the latest image.".to_string()
+        };
+        out_info!("{}", hint);
 
-        Ok(output)
+        Ok(hint)
     }
 }
 
-// === Machine Runtime (systemd/launchd via lib-daemon-core) ===
+// === Machine Runtime (via ADI daemon) ===
 
-/// Run an async service manager operation synchronously.
-/// Uses block_in_place to avoid blocking the async runtime.
-fn block_service<T, F>(f: impl FnOnce() -> F) -> Result<T, String>
-where
-    F: std::future::Future<Output = lib_daemon_core::Result<T>>,
-    T: Send,
-{
-    tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(f())
-    })
-    .map_err(|e| e.to_string())
+const SERVICE_NAME: &str = "adi.cocoon";
+
+fn get_runtime() -> &'static tokio::runtime::Runtime {
+    crate::get_runtime()
+}
+
+fn map_service_state(state: lib_daemon_client::ServiceState) -> CocoonStatus {
+    match state {
+        lib_daemon_client::ServiceState::Running => CocoonStatus::Running,
+        lib_daemon_client::ServiceState::Stopped => CocoonStatus::Stopped,
+        lib_daemon_client::ServiceState::Starting => CocoonStatus::Restarting,
+        lib_daemon_client::ServiceState::Stopping => CocoonStatus::Restarting,
+        lib_daemon_client::ServiceState::Failed => CocoonStatus::Unknown("failed".to_string()),
+    }
+}
+
+fn find_cocoon_service(
+    services: &[lib_daemon_client::ServiceInfo],
+) -> Option<&lib_daemon_client::ServiceInfo> {
+    services.iter().find(|s| s.name == SERVICE_NAME)
 }
 
 pub struct MachineRuntime;
@@ -394,108 +405,121 @@ impl MachineRuntime {
 
 impl Runtime for MachineRuntime {
     fn list(&self) -> Result<Vec<CocoonInfo>, String> {
-        let manager = get_service_manager();
-        let svc_status = block_service(|| async move { manager.status("cocoon").await })?;
+        let client = DaemonClient::new();
+        let services = get_runtime()
+            .block_on(client.list_services())
+            .map_err(|e| format!("Failed to list services: {}", e))?;
 
-        if matches!(svc_status, DaemonServiceStatus::NotInstalled) {
+        let Some(svc) = find_cocoon_service(&services) else {
             return Ok(vec![]);
-        }
+        };
 
-        let cocoon_status = map_service_status(&svc_status);
         Ok(vec![CocoonInfo {
             name: "cocoon".to_string(),
             runtime: RuntimeType::Machine,
-            status: cocoon_status,
+            status: map_service_state(svc.state),
             created: None,
             image: None,
         }])
     }
 
     fn status(&self, _name: &str) -> Result<CocoonInfo, String> {
-        let manager = get_service_manager();
-        let svc_status = block_service(|| async move { manager.status("cocoon").await })?;
+        let client = DaemonClient::new();
+        let services = get_runtime()
+            .block_on(client.list_services())
+            .map_err(|e| format!("Failed to list services: {}", e))?;
 
-        if matches!(svc_status, DaemonServiceStatus::NotInstalled) {
-            return Err(
-                "Machine service not installed. Install with: adi cocoon create --runtime machine"
-                    .to_string(),
-            );
-        }
+        let svc = find_cocoon_service(&services).ok_or_else(|| {
+            "Cocoon service not registered. Start with: adi cocoon create --runtime machine"
+                .to_string()
+        })?;
 
         Ok(CocoonInfo {
             name: "cocoon".to_string(),
             runtime: RuntimeType::Machine,
-            status: map_service_status(&svc_status),
+            status: map_service_state(svc.state),
             created: None,
             image: None,
         })
     }
 
     fn start(&self, _name: &str) -> Result<String, String> {
-        let manager = get_service_manager();
-        block_service(|| async move { manager.start("cocoon").await })
-            .map(|_| "Service started".to_string())
+        crate::ensure_daemon_running()?;
+        Ok("Cocoon service started".to_string())
     }
 
     fn stop(&self, _name: &str) -> Result<String, String> {
-        let manager = get_service_manager();
-        block_service(|| async move { manager.stop("cocoon").await })
-            .map(|_| "Service stopped".to_string())
+        let client = DaemonClient::new();
+        get_runtime()
+            .block_on(client.stop_service(SERVICE_NAME, false))
+            .map_err(|e| format!("Failed to stop cocoon service: {}", e))?;
+        Ok("Cocoon service stopped".to_string())
     }
 
     fn restart(&self, _name: &str) -> Result<String, String> {
-        let manager = get_service_manager();
-        block_service(|| async move { manager.restart("cocoon").await })
-            .map(|_| "Service restarted".to_string())
+        let client = DaemonClient::new();
+        get_runtime()
+            .block_on(client.restart_service(SERVICE_NAME))
+            .map_err(|e| format!("Failed to restart cocoon service: {}", e))?;
+        Ok("Cocoon service restarted".to_string())
     }
 
     fn logs(&self, _name: &str, follow: bool, tail: Option<u32>) -> Result<(), String> {
         if follow {
-            // ServiceManager::logs doesn't stream — use platform commands for follow mode
+            // DaemonClient.service_logs doesn't stream — use platform commands for follow
             #[cfg(target_os = "linux")]
             {
                 let mut cmd = std::process::Command::new("journalctl");
-                cmd.args(["--user", "-u", "cocoon", "-f"]);
+                cmd.args(["--user", "-u", "adi-daemon", "-f"]);
                 if let Some(n) = tail {
                     cmd.args(["-n", &n.to_string()]);
                 }
                 out_info!("Following logs (Ctrl+C to stop)...");
-                cmd.status().map_err(|e| format!("Failed to view logs: {}", e))?;
+                cmd.status()
+                    .map_err(|e| format!("Failed to view logs: {}", e))?;
                 return Ok(());
             }
 
             #[cfg(target_os = "macos")]
             {
+                let log_path = lib_daemon_client::paths::daemon_log_path();
                 let mut cmd = std::process::Command::new("tail");
                 cmd.arg("-f");
                 if let Some(n) = tail {
                     cmd.arg("-n").arg(n.to_string());
                 }
-                cmd.arg("/tmp/cocoon.log");
+                cmd.arg(log_path);
                 out_info!("Following logs (Ctrl+C to stop)...");
-                cmd.status().map_err(|e| format!("Failed to view logs: {}", e))?;
+                cmd.status()
+                    .map_err(|e| format!("Failed to view logs: {}", e))?;
                 return Ok(());
             }
 
             #[allow(unreachable_code)]
             Err("Unsupported OS".to_string())
         } else {
-            let manager = get_service_manager();
+            let client = DaemonClient::new();
             let lines = tail.unwrap_or(50) as usize;
-            let content = block_service(|| async move { manager.logs("cocoon", lines).await })?;
-            print!("{}", content);
+            let log_lines = get_runtime()
+                .block_on(client.service_logs(SERVICE_NAME, lines))
+                .map_err(|e| format!("Failed to get logs: {}", e))?;
+            for line in &log_lines {
+                out_info!("{}", line);
+            }
             Ok(())
         }
     }
 
     fn remove(&self, _name: &str, _force: bool) -> Result<String, String> {
-        let manager = get_service_manager();
-        block_service(|| async move { manager.uninstall("cocoon").await })
-            .map(|_| "Service uninstalled".to_string())
+        let client = DaemonClient::new();
+        get_runtime()
+            .block_on(client.stop_service(SERVICE_NAME, true))
+            .map_err(|e| format!("Failed to stop cocoon service: {}", e))?;
+        Ok("Cocoon service stopped".to_string())
     }
 
     fn is_available(&self) -> bool {
-        matches!(Platform::current(), Platform::Linux | Platform::MacOS)
+        true
     }
 
     fn runtime_type(&self) -> RuntimeType {
@@ -505,13 +529,14 @@ impl Runtime for MachineRuntime {
     fn update(&self, _name: &str) -> Result<String, String> {
         out_info!("Updating Machine cocoon...");
 
-        let manager = get_service_manager();
-        let installed = block_service(|| async move { manager.is_installed("cocoon").await })
-            .unwrap_or(false);
+        let client = DaemonClient::new();
+        let services = get_runtime()
+            .block_on(client.list_services())
+            .unwrap_or_default();
 
-        if !installed {
+        if find_cocoon_service(&services).is_none() {
             return Err(
-                "Machine service not installed. Install with: adi cocoon create --runtime machine"
+                "Cocoon service not registered. Start with: adi cocoon create --runtime machine"
                     .to_string(),
             );
         }
@@ -522,31 +547,20 @@ impl Runtime for MachineRuntime {
     fn check_update(&self, _name: &str) -> Result<String, String> {
         out_info!("Checking for updates for Machine cocoon...");
 
-        let manager = get_service_manager();
-        let installed = block_service(|| async move { manager.is_installed("cocoon").await })
-            .unwrap_or(false);
+        let client = DaemonClient::new();
+        let services = get_runtime()
+            .block_on(client.list_services())
+            .unwrap_or_default();
 
-        if !installed {
+        if find_cocoon_service(&services).is_none() {
             return Err(
-                "Machine service not installed. Install with: adi cocoon create --runtime machine"
+                "Cocoon service not registered. Start with: adi cocoon create --runtime machine"
                     .to_string(),
             );
         }
 
         let check_result = self_update::check_for_updates()?;
         Ok(self_update::format_check_result(&check_result))
-    }
-}
-
-fn map_service_status(s: &DaemonServiceStatus) -> CocoonStatus {
-    match s {
-        DaemonServiceStatus::Running { .. } => CocoonStatus::Running,
-        DaemonServiceStatus::Stopped | DaemonServiceStatus::NotInstalled => CocoonStatus::Stopped,
-        DaemonServiceStatus::Starting | DaemonServiceStatus::Stopping => CocoonStatus::Restarting,
-        DaemonServiceStatus::Failed { reason } => {
-            CocoonStatus::Unknown(reason.clone().unwrap_or_else(|| "failed".to_string()))
-        }
-        DaemonServiceStatus::Unknown => CocoonStatus::Unknown("unknown".to_string()),
     }
 }
 

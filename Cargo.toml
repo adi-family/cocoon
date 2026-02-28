@@ -21,11 +21,9 @@ services = ["tasks-core"]
 kb-service = ["kb-core"]
 
 [dependencies]
-# Plugin SDK - one import for everything
+# Plugin SDK
 lib-plugin-prelude = { path = "../lib/lib-plugin-prelude" }
-
-# Interactive CLI
-inquire = "0.7"
+lib-plugin-abi-v3 = { path = "../lib/lib-plugin-abi-v3" }
 
 # Environment
 lib-env-parse = { path = "../lib/lib-env-parse" }
@@ -33,8 +31,8 @@ lib-env-parse = { path = "../lib/lib-env-parse" }
 # Console output
 lib-console-output = { path = "../lib/lib-console-output" }
 
-# Daemon management
-lib-daemon-core = { path = "../lib/lib-daemon-core" }
+# Daemon client for adi daemon communication
+lib-daemon-client = { path = "../lib/lib-daemon-client" }
 
 # Core dependencies
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "fs", "process", "io-util", "sync", "signal"] }
@@ -42,6 +40,8 @@ tokio-tungstenite = "0.24"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 async-trait = "0.1"
+once_cell = "1"
+anyhow = "1"
 
 # ADI services (optional, for embedded service support)
 tasks-core = { path = "../tasks/core", optional = true }
@@ -81,6 +81,7 @@ name = "Cocoon"
 type = "core"
 
 [package.metadata.plugin.compatibility]
+api_version = 3
 min_host_version = "0.8.0"
 
 [package.metadata.plugin.cli]
@@ -92,6 +93,11 @@ aliases = []
 id = "adi.cocoon.cli"
 version = "1.0.0"
 description = "CLI commands for cocoon management"
+
+[package.metadata.plugin.daemon]
+auto_start = false
+restart_on_failure = true
+max_restarts = 3
 
 [package.metadata.plugin.tags]
 categories = ["remote", "execution", "terminal", "pty"]

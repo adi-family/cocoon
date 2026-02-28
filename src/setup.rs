@@ -3,19 +3,23 @@
 //! Starts a local HTTP server that the browser connects to with a setup token,
 //! then installs and starts the cocoon as a machine runtime service.
 
-use lib_console_output::{out_info, out_success, out_warn};
+use lib_console_output::{out_info, out_success};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// Run the pairing setup flow: HTTP server → browser connect → install + start cocoon.
-pub async fn run_setup(port: u16) -> Result<String, String> {
+pub async fn run_setup(port: u16, cli_url: Option<String>) -> Result<String, String> {
     let hostname = get_machine_name();
     let (connect_tx, mut connect_rx) = tokio::sync::mpsc::channel::<ConnectRequest>(1);
+
+    // If --url provided, store it so /connect can use it as override.
+    let signaling_override = cli_url.map(|u| Arc::new(u));
 
     let state = Arc::new(SetupServerState {
         connected: RwLock::new(false),
         hostname: hostname.clone(),
         connect_tx,
+        signaling_override: signaling_override.clone(),
     });
 
     let cors = tower_http::cors::CorsLayer::new()
@@ -34,6 +38,9 @@ pub async fn run_setup(port: u16) -> Result<String, String> {
     out_info!("Starting ADI local server...");
     out_info!("  Name: {}", hostname);
     out_info!("  URL:  http://localhost:{}", port);
+    if let Some(ref url) = signaling_override {
+        out_info!("  Signaling: {}", url);
+    }
     out_info!("Waiting for browser connection... (Ctrl+C to stop)");
 
     let listener = tokio::net::TcpListener::bind(addr)
@@ -45,27 +52,36 @@ pub async fn run_setup(port: u16) -> Result<String, String> {
     });
 
     let result = if let Some(req) = connect_rx.recv().await {
+        let signaling_url = signaling_override
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&req.signaling_url);
+
         out_info!("Browser connected! Setting up cocoon...");
+        out_info!("  Signaling: {}", signaling_url);
+        if !req.token.is_empty() {
+            let masked = if req.token.len() > 8 {
+                format!("{}...{}", &req.token[..4], &req.token[req.token.len()-4..])
+            } else {
+                "****".to_string()
+            };
+            out_info!("  Token:     {}", masked);
+        }
 
-        std::env::set_var("SIGNALING_SERVER_URL", &req.signaling_url);
-        std::env::set_var("COCOON_SETUP_TOKEN", &req.token);
-        std::env::set_var("COCOON_NAME", &hostname);
+        let mut env: Vec<(&str, &str)> = vec![
+            ("SIGNALING_SERVER_URL", signaling_url),
+        ];
+        if !req.token.is_empty() {
+            env.push(("COCOON_SETUP_TOKEN", &req.token));
+        }
 
-        // Install as machine runtime service
-        let manager = crate::RuntimeManager::new();
-        let runtime = manager.get_runtime(crate::RuntimeType::Machine);
-        let _ = runtime.stop("cocoon");
-
-        match crate::service_install() {
-            Ok(msg) => {
-                out_success!("{}", msg);
-                match crate::service_start() {
-                    Ok(start_msg) => out_success!("{}", start_msg),
-                    Err(e) => out_warn!("Failed to start service: {}", e),
-                }
+        // Start cocoon via ADI daemon with the signaling URL injected
+        match crate::start_cocoon_daemon(&env).await {
+            Ok(()) => {
+                out_success!("Cocoon service registered with ADI daemon");
                 Ok("Cocoon installed and running as a background service".to_string())
             }
-            Err(e) => Err(format!("Failed to install cocoon service: {}", e)),
+            Err(e) => Err(format!("Failed to start cocoon service: {}", e)),
         }
     } else {
         Ok("Setup cancelled".to_string())
@@ -80,6 +96,7 @@ struct SetupServerState {
     connected: RwLock<bool>,
     hostname: String,
     connect_tx: tokio::sync::mpsc::Sender<ConnectRequest>,
+    signaling_override: Option<Arc<String>>,
 }
 
 /// Request body for the /connect endpoint.
@@ -101,12 +118,16 @@ async fn health_handler(
 ) -> axum::Json<serde_json::Value> {
     let connected = *state.connected.read().await;
 
-    axum::Json(serde_json::json!({
+    let mut body = serde_json::json!({
         "status": "ok",
         "name": state.hostname,
         "version": env!("CARGO_PKG_VERSION"),
         "connected": connected
-    }))
+    });
+    if let Some(ref url) = state.signaling_override {
+        body["signaling_url"] = serde_json::Value::String(url.as_ref().clone());
+    }
+    axum::Json(body)
 }
 
 /// Connect endpoint — browser sends token to register with platform.

@@ -780,12 +780,12 @@ async fn get_or_create_secret() -> Result<(String, Option<String>), Box<dyn std:
 }
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
+    let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive("cocoon=info".parse().expect("valid tracing directive")),
         )
-        .init();
+        .try_init();
 
     tracing::info!("🐛 Cocoon starting (v{})", env!("CARGO_PKG_VERSION"));
 

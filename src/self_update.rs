@@ -4,7 +4,7 @@
 //! - Docker: Pull latest image and recreate container
 //! - Machine: Download new binary and restart service
 
-use lib_console_output::out_info;
+use lib_console_output::{out_info, out_success, KeyValue, Renderable};
 use semver::Version;
 use std::path::PathBuf;
 
@@ -468,31 +468,29 @@ pub mod machine {
 
 /// Format update check result for display
 pub fn format_check_result(result: &UpdateCheckResult) -> String {
-    let mut output = String::new();
-
-    output.push_str(&format!("Current version: {}\n", result.current_version));
-    output.push_str(&format!("Latest version:  {}\n", result.latest_version));
-    output.push('\n');
+    KeyValue::new()
+        .entry("Current version", &result.current_version)
+        .entry("Latest version", &result.latest_version)
+        .print();
 
     if result.update_available {
-        output.push_str("Update available!\n\n");
+        out_success!("Update available!");
 
         if let Some(ref notes) = result.release_notes {
-            output.push_str("Release notes:\n");
+            out_info!("Release notes:");
             let truncated: String = notes.chars().take(500).collect();
-            output.push_str(&truncated);
-            if notes.len() > 500 {
-                output.push_str("...\n");
-            }
-            output.push('\n');
+            let suffix = if notes.len() > 500 { "..." } else { "" };
+            out_info!("{}{}", truncated, suffix);
         }
 
-        output.push_str("\nRun 'adi cocoon update <name>' to update.\n");
+        let hint = "Run 'adi cocoon update <name>' to update.".to_string();
+        out_info!("{}", hint);
+        hint
     } else {
-        output.push_str("You are running the latest version.\n");
+        let msg = "You are running the latest version.".to_string();
+        out_success!("{}", msg);
+        msg
     }
-
-    output
 }
 
 #[cfg(test)]
