@@ -22,17 +22,17 @@ kb-service = ["kb-core"]
 
 [dependencies]
 # Plugin SDK
-lib-plugin-prelude = { path = "../lib/lib-plugin-prelude" }
-lib-plugin-abi-v3 = { path = "../lib/lib-plugin-abi-v3" }
+lib-plugin-prelude = { path = "../_lib/lib-plugin-prelude" }
+lib-plugin-abi-v3 = { path = "../_lib/lib-plugin-abi-v3" }
 
 # Environment
-lib-env-parse = { path = "../lib/lib-env-parse" }
+lib-env-parse = { path = "../_lib/lib-env-parse" }
 
 # Console output
-lib-console-output = { path = "../lib/lib-console-output" }
+lib-console-output = { path = "../_lib/lib-console-output" }
 
 # Daemon client for adi daemon communication
-lib-daemon-client = { path = "../lib/lib-daemon-client" }
+lib-daemon-client = { path = "../_lib/lib-daemon-client" }
 
 # Core dependencies
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "fs", "process", "io-util", "sync", "signal"] }
@@ -50,7 +50,7 @@ base64 = "0.22"
 walkdir = "2"
 futures = "0.3"
 uuid = { version = "1", features = ["v4", "serde"] }
-lib-signaling-protocol = { path = "../lib/lib-signaling-protocol" }
+lib-signaling-protocol = { path = "../signaling/protocol" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 portable-pty = "0.8"
