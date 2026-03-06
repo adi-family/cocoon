@@ -1,36 +1,11 @@
-//! Cocoon Plugin
-//!
-//! Remote containerized worker with PTY support and signaling server connectivity.
-
-pub mod adi_router;
-mod core;
-pub mod filesystem;
-mod interactive;
-mod runtime;
-mod self_update;
-pub mod services;
-mod setup;
-pub mod silk;
-pub mod webrtc;
-
-pub use adi_router::{
-    create_stream_channel, AdiHandleResult, AdiRouter, AdiService, AdiServiceError, StreamSender,
-};
-pub use core::run;
-pub use runtime::{CocoonInfo, CocoonStatus, Runtime, RuntimeManager, RuntimeType};
-pub use silk::{AnsiToHtml, SilkSession};
-pub use webrtc::WebRtcManager;
-
-#[cfg(feature = "tasks-core")]
-pub use services::TasksService;
-
+use cocoon_core::{CocoonInfo, CocoonStatus, RuntimeManager, RuntimeType};
 use lib_console_output::{out_error, out_info, out_success, theme, KeyValue, Renderable};
 use lib_env_parse::{env_opt, env_vars};
 use once_cell::sync::OnceCell;
 
 static RUNTIME: OnceCell<tokio::runtime::Runtime> = OnceCell::new();
 
-pub(crate) fn get_runtime() -> &'static tokio::runtime::Runtime {
+fn get_runtime() -> &'static tokio::runtime::Runtime {
     RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -39,15 +14,11 @@ pub(crate) fn get_runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
-pub(crate) async fn ensure_daemon_running_async() -> std::result::Result<(), String> {
+async fn ensure_daemon_running_async() -> std::result::Result<(), String> {
     start_cocoon_daemon(&[]).await
 }
 
-/// Start the cocoon daemon service, optionally injecting extra env vars.
-///
-/// If the service is already running without extra env, it's left alone.
-/// If extra env is provided, an existing service is restarted with the new vars.
-pub(crate) async fn start_cocoon_daemon(
+async fn start_cocoon_daemon(
     extra_env: &[(&str, &str)],
 ) -> std::result::Result<(), String> {
     let client = lib_daemon_client::DaemonClient::new();
@@ -66,7 +37,6 @@ pub(crate) async fn start_cocoon_daemon(
         .iter()
         .any(|s| s.name == "adi.cocoon" && s.state.is_running());
 
-    // If extra env is provided and service is already running, restart it.
     if running && !extra_env.is_empty() {
         out_info!("Restarting cocoon service with new configuration...");
         let _ = client.stop_service("adi.cocoon", false).await;
@@ -75,7 +45,6 @@ pub(crate) async fn start_cocoon_daemon(
         return Ok(());
     }
 
-    // Build config with extra env vars
     let config = if extra_env.is_empty() {
         None
     } else {
@@ -112,8 +81,7 @@ pub(crate) async fn start_cocoon_daemon(
     Ok(())
 }
 
-/// Sync wrapper for callers not already inside a tokio runtime.
-pub(crate) fn ensure_daemon_running() -> std::result::Result<(), String> {
+fn ensure_daemon_running() -> std::result::Result<(), String> {
     get_runtime().block_on(ensure_daemon_running_async())
 }
 
@@ -199,8 +167,6 @@ pub struct UpdateArgs {
     pub all: bool,
 }
 
-
-/// Generate a unique container name
 fn generate_container_name() -> String {
     let output = std::process::Command::new("docker")
         .args(["ps", "-a", "--format", "{{.Names}}"])
@@ -231,7 +197,6 @@ fn generate_container_name() -> String {
     "cocoon-worker".to_string()
 }
 
-/// Create a Docker cocoon
 fn create_docker_cocoon(
     name: &str,
     signaling_url: &str,
@@ -247,7 +212,6 @@ fn create_docker_cocoon(
         .arg("--name")
         .arg(name);
 
-    // Add host mapping for .local domains
     if let Ok(url) = url::Url::parse(signaling_url) {
         if let Some(host) = url.host_str() {
             if host.ends_with(".local") {
@@ -378,7 +342,6 @@ ENVIRONMENT VARIABLES:
 "#
 }
 
-/// Cocoon Plugin
 pub struct CocoonPlugin;
 
 impl CocoonPlugin {
@@ -459,7 +422,7 @@ impl CliCommands for CocoonPlugin {
             }
             Some("") | Some("interactive") | Some("i") | None => {
                 let manager = RuntimeManager::new();
-                if let Err(e) = interactive::run_interactive(&manager) {
+                if let Err(e) = cocoon_core::run_interactive(&manager) {
                     return Ok(CliResult::error(e));
                 }
                 Ok(CliResult::success("Interactive mode exited".to_string()))
@@ -478,7 +441,7 @@ impl CocoonPlugin {
     #[command(name = "list", description = "List all cocoons")]
     async fn list(&self) -> CmdResult {
         let manager = RuntimeManager::new();
-        interactive::handle_list(&manager).map_err(|e| e)?;
+        cocoon_core::handle_list(&manager).map_err(|e| e)?;
         Ok("Listed cocoons".to_string())
     }
 
@@ -517,7 +480,7 @@ impl CocoonPlugin {
                 None => Err(format!("Cocoon '{}' not found", name)),
             }
         } else {
-            interactive::run_interactive(&manager).map_err(|e| e)?;
+            cocoon_core::run_interactive(&manager).map_err(|e| e)?;
             Ok("Done".to_string())
         }
     }
@@ -538,7 +501,7 @@ impl CocoonPlugin {
                 )),
             }
         } else {
-            interactive::run_interactive(&manager).map_err(|e| e)?;
+            cocoon_core::run_interactive(&manager).map_err(|e| e)?;
             Ok("Done".to_string())
         }
     }
@@ -556,7 +519,7 @@ impl CocoonPlugin {
                 None => Err(format!("Cocoon '{}' not found", name)),
             }
         } else {
-            interactive::run_interactive(&manager).map_err(|e| e)?;
+            cocoon_core::run_interactive(&manager).map_err(|e| e)?;
             Ok("Done".to_string())
         }
     }
@@ -574,7 +537,7 @@ impl CocoonPlugin {
                 None => Err(format!("Cocoon '{}' not found", name)),
             }
         } else {
-            interactive::run_interactive(&manager).map_err(|e| e)?;
+            cocoon_core::run_interactive(&manager).map_err(|e| e)?;
             Ok("Done".to_string())
         }
     }
@@ -592,7 +555,7 @@ impl CocoonPlugin {
                 None => Err(format!("Cocoon '{}' not found", name)),
             }
         } else {
-            interactive::run_interactive(&manager).map_err(|e| e)?;
+            cocoon_core::run_interactive(&manager).map_err(|e| e)?;
             Ok("Done".to_string())
         }
     }
@@ -610,7 +573,7 @@ impl CocoonPlugin {
                 None => Err(format!("Cocoon '{}' not found", name)),
             }
         } else {
-            interactive::run_interactive(&manager).map_err(|e| e)?;
+            cocoon_core::run_interactive(&manager).map_err(|e| e)?;
             Ok("Done".to_string())
         }
     }
@@ -652,7 +615,7 @@ impl CocoonPlugin {
                 }
             }
         } else {
-            interactive::run_interactive(&manager).map_err(|e| e)?;
+            cocoon_core::run_interactive(&manager).map_err(|e| e)?;
             Ok("Done".to_string())
         }
     }
@@ -660,7 +623,7 @@ impl CocoonPlugin {
     #[command(name = "run", description = "Run cocoon natively in foreground")]
     async fn run_native(&self) -> CmdResult {
         run_with_runtime(async {
-            if let Err(e) = core::run().await {
+            if let Err(e) = cocoon_core::run().await {
                 out_error!("Cocoon error: {}", e);
             }
             Ok("Cocoon stopped".to_string())
@@ -672,7 +635,7 @@ impl CocoonPlugin {
         let port = args.port.unwrap_or(14730);
         let url = args.url;
         run_with_runtime(async move {
-            setup::run_setup(port, url).await
+            cocoon_core::run_setup(port, url).await
         })
     }
 
@@ -776,7 +739,7 @@ impl CocoonPlugin {
                 Err(e) => Err(e),
             }
         } else {
-            interactive::run_interactive(&manager).map_err(|e| e)?;
+            cocoon_core::run_interactive(&manager).map_err(|e| e)?;
             Ok("Done".to_string())
         }
     }
@@ -817,7 +780,7 @@ impl CocoonPlugin {
                 };
 
                 let result = rt.block_on(async {
-                    core::run().await.map_err(|e| e.to_string())
+                    cocoon_core::run().await.map_err(|e| e.to_string())
                 });
 
                 let _ = tx.send(result);
@@ -830,11 +793,6 @@ impl CocoonPlugin {
     }
 }
 
-/// Run an async block on a dedicated Tokio runtime.
-///
-/// Plugin cdylibs have their own copy of Tokio that doesn't share the host's
-/// reactor, so any async I/O (TCP listeners, spawned tasks, etc.) must run on
-/// a runtime owned by the plugin.
 fn run_with_runtime<F: std::future::Future<Output = CmdResult> + Send + 'static>(
     fut: F,
 ) -> CmdResult {
@@ -847,7 +805,6 @@ fn run_with_runtime<F: std::future::Future<Output = CmdResult> + Send + 'static>
     .map_err(|_| "Async task panicked".to_string())?
 }
 
-/// ABI version for host compatibility check.
 #[no_mangle]
 pub extern "C" fn plugin_abi_version() -> u32 {
     3

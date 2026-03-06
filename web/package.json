@@ -1,0 +1,27 @@
+{
+  "name": "@adi/cocoon-web-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./bus": "./src/bus/index.ts"
+  },
+  "scripts": {
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "dev": "vite build --watch"
+  },
+  "dependencies": {
+    "@adi/signaling-web-plugin": "file:../../signaling/web",
+    "@adi/debug-screen-web-plugin": "file:../../debug-screen/web",
+    "@adi-family/sdk-plugin": "file:../../../packages/plugin-sdk",
+    "lit": "^3.3.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "vite": "^6.1.0"
+  }
+}

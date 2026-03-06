@@ -1,0 +1,69 @@
+[package]
+name = "cocoon-plugin"
+version = "0.2.7"
+edition = "2021"
+description = "ADI Cocoon plugin - containerized worker for remote command execution"
+license = "LicenseRef-Proprietary"
+authors = ["ADI Team"]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Core library
+cocoon-core = { path = "../core" }
+
+# Plugin SDK
+lib-plugin-prelude = { path = "../../_lib/lib-plugin-prelude" }
+lib-plugin-abi-v3 = { path = "../../_lib/lib-plugin-abi-v3" }
+
+# Console output
+lib-console-output = { path = "../../_lib/lib-console-output" }
+
+# Environment
+lib-env-parse = { path = "../../_lib/lib-env-parse" }
+
+# Daemon client for adi daemon communication
+lib-daemon-client = { path = "../../_lib/lib-daemon-client" }
+
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+async-trait = "0.1"
+once_cell = "1"
+
+# Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1"
+
+# URL parsing (for docker cocoon creation)
+url = "2"
+
+[package.metadata.plugin]
+id = "adi.cocoon"
+name = "Cocoon"
+type = "core"
+
+[package.metadata.plugin.compatibility]
+api_version = 3
+min_host_version = "0.8.0"
+
+[package.metadata.plugin.cli]
+command = "cocoon"
+description = "Containerized worker for remote command execution"
+aliases = []
+
+[[package.metadata.plugin.provides]]
+id = "adi.cocoon.cli"
+version = "1.0.0"
+description = "CLI commands for cocoon management"
+
+[package.metadata.plugin.daemon]
+auto_start = false
+restart_on_failure = true
+max_restarts = 3
+
+[package.metadata.plugin.tags]
+categories = ["remote", "execution", "terminal", "pty"]
