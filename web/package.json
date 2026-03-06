@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@adi/signaling-web-plugin": "file:../../signaling/web",
+    "@adi/router-web-plugin": "file:../../router/web",
     "@adi/debug-screen-web-plugin": "file:../../debug-screen/web",
     "@adi-family/sdk-plugin": "file:../../../packages/plugin-sdk",
     "lit": "^3.3.1"

@@ -9,7 +9,7 @@
 
 use crate::adi_router::{AdiHandleResult, AdiService, AdiServiceError};
 use async_trait::async_trait;
-use lib_signaling_protocol::AdiMethodInfo;
+use crate::protocol::types::AdiMethodInfo;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
 use std::collections::HashMap;

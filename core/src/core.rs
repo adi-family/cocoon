@@ -1,7 +1,9 @@
 use crate::adi_router::AdiRouter;
 use crate::silk::{AnsiToHtml, SilkSession};
 use futures::{SinkExt, StreamExt};
-use lib_signaling_protocol::{QueryType, SignalingMessage, SilkResponse, SilkStream};
+use crate::protocol::messages::CocoonMessage;
+use crate::protocol::types::{SilkHtmlSpan, SilkStream};
+use lib_signaling_protocol::SignalingMessage;
 use portable_pty::{CommandBuilder, PtySize};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -33,6 +35,62 @@ const DEVICE_ID_PATH: &str = "/cocoon/.device_id";
 // Secret security requirements
 const MIN_SECRET_LENGTH: usize = 32;
 const GENERATED_SECRET_LENGTH: usize = 48; // 288 bits of entropy
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum QueryType {
+    ListTasks,
+    GetTaskStats,
+    SearchTasks,
+    SearchKnowledgebase,
+    Custom { query_name: String },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum SilkResponse {
+    SessionCreated {
+        session_id: Uuid,
+        cwd: String,
+        shell: String,
+    },
+    CommandStarted {
+        session_id: Uuid,
+        command_id: Uuid,
+        interactive: bool,
+    },
+    Output {
+        session_id: Uuid,
+        command_id: Uuid,
+        stream: SilkStream,
+        data: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        html: Option<Vec<SilkHtmlSpan>>,
+    },
+    InteractiveRequired {
+        session_id: Uuid,
+        command_id: Uuid,
+        reason: String,
+        pty_session_id: Uuid,
+    },
+    CommandCompleted {
+        session_id: Uuid,
+        command_id: Uuid,
+        exit_code: i32,
+        cwd: String,
+    },
+    SessionClosed {
+        session_id: Uuid,
+    },
+    Error {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<Uuid>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        command_id: Option<Uuid>,
+        code: String,
+        message: String,
+    },
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -687,7 +745,7 @@ async fn save_device_id(device_id: &str) {
 
 /// Send deregister message to signaling server
 async fn send_deregister(writer: &SharedWriter, device_id: &str, reason: Option<&str>) {
-    let deregister_msg = SignalingMessage::Deregister {
+    let deregister_msg = SignalingMessage::DeviceDeregister {
         device_id: device_id.to_string(),
         reason: reason.map(|r| r.to_string()),
     };
@@ -777,6 +835,123 @@ async fn get_or_create_secret() -> Result<(String, Option<String>), Box<dyn std:
 
     // New secret means no device_id yet (first registration)
     Ok((secret, None))
+}
+
+/// Handle WebRTC-related CocoonMessage variants received via SyncData
+async fn handle_cocoon_webrtc(
+    msg: CocoonMessage,
+    webrtc: Arc<crate::webrtc::WebRtcManager>,
+    writer: SharedWriter,
+) {
+    /// Helper to send a CocoonMessage wrapped in SyncData
+    async fn send_cocoon_msg(writer: &SharedWriter, msg: &CocoonMessage) {
+        let sync_msg = SignalingMessage::SyncData {
+            payload: serde_json::to_value(msg).expect("CocoonMessage serialization cannot fail"),
+        };
+        let mut w = writer.lock().await;
+        let _ = w
+            .send(Message::Text(
+                serde_json::to_string(&sync_msg).expect("SignalingMessage serialization cannot fail"),
+            ))
+            .await;
+    }
+
+    match msg {
+        CocoonMessage::WebrtcStartSession {
+            session_id,
+            device_id: client_id,
+            ..
+        } => {
+            tracing::info!("🎥 WebRTC session request from {}: {}", client_id, session_id);
+            match webrtc.create_session(session_id.clone()).await {
+                Ok(()) => {
+                    tracing::info!("✅ WebRTC session {} created", session_id);
+                }
+                Err(e) => {
+                    tracing::error!("❌ Failed to create WebRTC session: {}", e);
+                    send_cocoon_msg(&writer, &CocoonMessage::WebrtcError {
+                        session_id,
+                        code: "session_create_failed".to_string(),
+                        message: e,
+                    }).await;
+                }
+            }
+        }
+
+        CocoonMessage::WebrtcOffer { session_id, sdp } => {
+            tracing::info!("📥 WebRTC offer received for session {}", session_id);
+            match webrtc.handle_offer(&session_id, &sdp).await {
+                Ok(answer_sdp) => {
+                    tracing::info!("📤 Sending WebRTC answer for session {}", session_id);
+                    send_cocoon_msg(&writer, &CocoonMessage::WebrtcAnswer {
+                        session_id,
+                        sdp: answer_sdp,
+                    }).await;
+                }
+                Err(e) => {
+                    tracing::error!("❌ Failed to handle WebRTC offer: {}", e);
+                    send_cocoon_msg(&writer, &CocoonMessage::WebrtcError {
+                        session_id,
+                        code: "offer_failed".to_string(),
+                        message: e,
+                    }).await;
+                }
+            }
+        }
+
+        CocoonMessage::WebrtcIceCandidate {
+            session_id,
+            candidate,
+            sdp_mid,
+            sdp_mline_index,
+        } => {
+            tracing::debug!("🧊 ICE candidate received for session {}", session_id);
+            if let Err(e) = webrtc
+                .add_ice_candidate(
+                    &session_id,
+                    &candidate,
+                    sdp_mid.as_deref(),
+                    sdp_mline_index.map(|i| i as u32),
+                )
+                .await
+            {
+                tracing::warn!("⚠️ Failed to add ICE candidate: {}", e);
+            }
+        }
+
+        CocoonMessage::WebrtcSessionEnded { session_id, reason } => {
+            let reason_str = reason.as_deref().unwrap_or("not specified");
+            if reason_str == "session_replaced" {
+                tracing::info!("🔄 WebRTC session {} replaced by newer session from same client", session_id);
+            } else {
+                tracing::info!("🔌 WebRTC session {} ended (reason: {})", session_id, reason_str);
+            }
+            let _ = webrtc.close_session(&session_id).await;
+        }
+
+        CocoonMessage::WebrtcData {
+            session_id: _,
+            channel,
+            data,
+            binary,
+        } => {
+            tracing::debug!("📦 WebRTC data received: {} bytes on channel {}", data.len(), channel);
+            match channel.as_str() {
+                "terminal" => tracing::debug!("Terminal data: {}", data),
+                "file-transfer" => tracing::debug!("File transfer data: {} bytes, binary: {}", data.len(), binary),
+                _ => tracing::debug!("Unknown channel: {}", channel),
+            }
+        }
+
+        CocoonMessage::WebrtcError { session_id, code, message } => {
+            tracing::error!("❌ WebRTC error for session {}: {} - {}", session_id, code, message);
+            let _ = webrtc.close_session(&session_id).await;
+        }
+
+        _ => {
+            tracing::debug!("📨 Unhandled CocoonMessage in WebRTC handler");
+        }
+    }
 }
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -905,25 +1080,23 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let setup_token = env_opt(EnvVar::CocoonSetupToken.as_str());
     let cocoon_name = env_opt(EnvVar::CocoonName.as_str());
 
-    // Register with signaling server
-    // If setup token provided: use RegisterWithSetupToken (auto-claims ownership)
-    // Otherwise: use Register (manual claiming required)
-    let secret_for_claiming = secret.clone(); // Keep for displaying claiming instructions
+    // Register with signaling server via DeviceRegister
+    // Setup token and name are passed via tags for auto-claim flow
+    let _secret_for_claiming = secret.clone();
     let cocoon_version = env!("CARGO_PKG_VERSION").to_string();
-    let register_msg = if let Some(ref token) = setup_token {
+    let mut tags = std::collections::HashMap::new();
+    if let Some(ref token) = setup_token {
         tracing::info!("🎫 Using setup token for auto-registration");
-        SignalingMessage::RegisterWithSetupToken {
-            secret,
-            setup_token: token.clone(),
-            name: cocoon_name.clone(),
-            version: cocoon_version,
-        }
-    } else {
-        SignalingMessage::Register {
-            secret,
-            device_id: device_id.clone(),
-            version: cocoon_version,
-        }
+        tags.insert("setup_token".to_string(), token.clone());
+    }
+    if let Some(ref name) = cocoon_name {
+        tags.insert("name".to_string(), name.clone());
+    }
+    let register_msg = SignalingMessage::DeviceRegister {
+        secret,
+        device_id: device_id.clone(),
+        version: cocoon_version,
+        tags: if tags.is_empty() { None } else { Some(tags) },
     };
 
     {
@@ -1030,25 +1203,32 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 };
 
                 match message {
-                    SignalingMessage::Registered {
+                    SignalingMessage::DeviceRegisterResponse {
                         device_id: assigned_id,
+                        tags,
                     } => {
                         tracing::info!("✅ Registration confirmed");
                         tracing::info!("🆔 Device ID: {}", assigned_id);
-                        tracing::info!("");
-                        tracing::info!("📋 To claim ownership:");
-                        tracing::info!(
-                            "   Anyone with this secret can become an owner (co-ownership supported)"
-                        );
-                        tracing::info!("");
-                        tracing::info!("   WebSocket message:");
-                        tracing::info!(
-                            r#"   {{ "type": "claim_cocoon", "device_id": "{}", "secret": "{}", "access_token": "YOUR_TOKEN" }}"#,
-                            assigned_id,
-                            secret_for_claiming
-                        );
-                        tracing::info!("");
-                        tracing::info!("   ⚠️  Share this secret only with trusted co-owners!");
+
+                        // Check if tags contain owner info (auto-claim flow)
+                        if let Some(ref t) = tags {
+                            if let Some(owner_id) = t.get("owner_id") {
+                                tracing::info!("👤 Owner: {}", owner_id);
+                                if let Some(name) = t.get("name") {
+                                    tracing::info!("📛 Name: {}", name);
+                                }
+                                tracing::info!("");
+                                tracing::info!("🎉 Cocoon is ready and claimed by your account!");
+                            }
+                        } else {
+                            tracing::info!("");
+                            tracing::info!("📋 To claim ownership:");
+                            tracing::info!(
+                                "   Anyone with this secret can become an owner (co-ownership supported)"
+                            );
+                            tracing::info!("");
+                            tracing::info!("   ⚠️  Share this secret only with trusted co-owners!");
+                        }
                         tracing::info!("");
 
                         // Store device ID for deregistration
@@ -1058,36 +1238,30 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         save_device_id(&assigned_id).await;
                     }
 
-                    SignalingMessage::RegisteredWithOwner {
-                        device_id: assigned_id,
-                        owner_id,
-                        name,
-                    } => {
-                        tracing::info!("✅ Registration confirmed with auto-claim");
-                        tracing::info!("🆔 Device ID: {}", assigned_id);
-                        tracing::info!("👤 Owner: {}", owner_id);
-                        if let Some(ref n) = name {
-                            tracing::info!("📛 Name: {}", n);
-                        }
-                        tracing::info!("");
-                        tracing::info!("🎉 Cocoon is ready and claimed by your account!");
-                        tracing::info!("");
-
-                        // Store device ID for deregistration
-                        *current_device_id_for_loop.lock().await = Some(assigned_id.clone());
-
-                        // Save device_id for future reconnections
-                        save_device_id(&assigned_id).await;
-
-                        // Clear setup token from env (one-time use)
-                        // Note: Can't actually clear env var, but we could delete from config
-                    }
-
-                    SignalingMessage::Deregistered { device_id } => {
+                    SignalingMessage::DeviceDeregisterResponse { device_id } => {
                         tracing::info!("✅ Deregistration confirmed for device: {}", device_id);
                     }
 
                     SignalingMessage::SyncData { payload } => {
+                        // Try parsing as CocoonMessage first (for WebRTC signaling)
+                        let type_str = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                        if type_str.starts_with("webrtc_") {
+                            match serde_json::from_value::<CocoonMessage>(payload) {
+                                Ok(cocoon_msg) => {
+                                    let webrtc = webrtc_manager.clone();
+                                    let writer_clone = writer.clone();
+                                    tokio::spawn(async move {
+                                        handle_cocoon_webrtc(cocoon_msg, webrtc, writer_clone).await;
+                                    });
+                                    continue;
+                                }
+                                Err(e) => {
+                                    tracing::warn!("⚠️ Invalid CocoonMessage: {}", e);
+                                    continue;
+                                }
+                            }
+                        }
+
                         let request: CommandRequest = match serde_json::from_value(payload) {
                             Ok(req) => req,
                             Err(e) => {
@@ -1667,173 +1841,16 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                             });
                         }
 
-                    SignalingMessage::PeerConnected { peer_id } => {
+                    SignalingMessage::DevicePeerConnected { peer_id } => {
                         tracing::info!("👋 Peer connected: {}", peer_id);
                     }
 
-                    SignalingMessage::PeerDisconnected { peer_id } => {
+                    SignalingMessage::DevicePeerDisconnected { peer_id } => {
                         tracing::info!("👋 Peer disconnected: {}", peer_id);
                     }
 
-                    SignalingMessage::Error { message } => {
+                    SignalingMessage::SystemError { message } => {
                         tracing::error!("❌ Server error: {}", message);
-                    }
-
-                    // ========== WebRTC Session Handlers ==========
-                    SignalingMessage::WebRtcStartSession {
-                        session_id,
-                        device_id: client_id,
-                        ..
-                    } => {
-                        tracing::info!("🎥 WebRTC session request from {}: {}", client_id, session_id);
-                        
-                        // IMPORTANT: Create session synchronously to avoid race condition
-                        // The browser sends the offer immediately after this message,
-                        // so the session must exist before we process the next message.
-                        match webrtc_manager.create_session(session_id.clone()).await {
-                            Ok(()) => {
-                                tracing::info!("✅ WebRTC session {} created", session_id);
-                                // Session started confirmation is sent by signaling server
-                            }
-                            Err(e) => {
-                                tracing::error!("❌ Failed to create WebRTC session: {}", e);
-                                let error_msg = SignalingMessage::WebRtcError {
-                                    session_id,
-                                    code: "session_create_failed".to_string(),
-                                    message: e,
-                                };
-                                let mut w = writer.lock().await;
-                                let _ = w
-                                    .send(Message::Text(
-                                        serde_json::to_string(&error_msg)
-                                            .expect("SignalingMessage serialization cannot fail"),
-                                    ))
-                                    .await;
-                            }
-                        }
-                    }
-
-                    SignalingMessage::WebRtcOffer { session_id, sdp } => {
-                        tracing::info!("📥 WebRTC offer received for session {}", session_id);
-                        let webrtc = webrtc_manager.clone();
-                        let writer_clone = writer.clone();
-                        let session_id_clone = session_id.clone();
-
-                        tokio::spawn(async move {
-                            match webrtc.handle_offer(&session_id_clone, &sdp).await {
-                                Ok(answer_sdp) => {
-                                    tracing::info!("📤 Sending WebRTC answer for session {}", session_id_clone);
-                                    let answer_msg = SignalingMessage::WebRtcAnswer {
-                                        session_id: session_id_clone,
-                                        sdp: answer_sdp,
-                                    };
-                                    let mut w = writer_clone.lock().await;
-                                    let _ = w
-                                        .send(Message::Text(
-                                            serde_json::to_string(&answer_msg).expect(
-                                                "SignalingMessage serialization cannot fail",
-                                            ),
-                                        ))
-                                        .await;
-                                }
-                                Err(e) => {
-                                    tracing::error!("❌ Failed to handle WebRTC offer: {}", e);
-                                    let error_msg = SignalingMessage::WebRtcError {
-                                        session_id: session_id_clone,
-                                        code: "offer_failed".to_string(),
-                                        message: e,
-                                    };
-                                    let mut w = writer_clone.lock().await;
-                                    let _ = w
-                                        .send(Message::Text(
-                                            serde_json::to_string(&error_msg).expect(
-                                                "SignalingMessage serialization cannot fail",
-                                            ),
-                                        ))
-                                        .await;
-                                }
-                            }
-                        });
-                    }
-
-                    SignalingMessage::WebRtcIceCandidate {
-                        session_id,
-                        candidate,
-                        sdp_mid,
-                        sdp_mline_index,
-                    } => {
-                        tracing::debug!("🧊 ICE candidate received for session {}", session_id);
-                        let webrtc = webrtc_manager.clone();
-                        
-                        tokio::spawn(async move {
-                            if let Err(e) = webrtc
-                                .add_ice_candidate(
-                                    &session_id,
-                                    &candidate,
-                                    sdp_mid.as_deref(),
-                                    sdp_mline_index,
-                                )
-                                .await
-                            {
-                                tracing::warn!("⚠️ Failed to add ICE candidate: {}", e);
-                            }
-                        });
-                    }
-
-                    SignalingMessage::WebRtcSessionEnded { session_id, reason } => {
-                        let reason_str = reason.as_deref().unwrap_or("not specified");
-                        if reason_str == "session_replaced" {
-                            tracing::info!(
-                                "🔄 WebRTC session {} replaced by newer session from same client",
-                                session_id
-                            );
-                        } else {
-                            tracing::info!(
-                                "🔌 WebRTC session {} ended (reason: {})",
-                                session_id,
-                                reason_str
-                            );
-                        }
-                        let webrtc = webrtc_manager.clone();
-                        
-                        tokio::spawn(async move {
-                            let _ = webrtc.close_session(&session_id).await;
-                        });
-                    }
-
-                    SignalingMessage::WebRtcData {
-                        session_id: _,
-                        channel,
-                        data,
-                        binary,
-                    } => {
-                        // Handle incoming data from WebRTC data channel (via signaling fallback)
-                        tracing::debug!("📦 WebRTC data received: {} bytes on channel {}", data.len(), channel);
-                        
-                        // Process the data based on channel type
-                        match channel.as_str() {
-                            "terminal" => {
-                                // Forward to terminal processing
-                                // This could trigger command execution similar to SyncData
-                                tracing::debug!("Terminal data: {}", data);
-                            }
-                            "file-transfer" => {
-                                // Handle file transfer
-                                tracing::debug!("File transfer data: {} bytes, binary: {}", data.len(), binary);
-                            }
-                            _ => {
-                                tracing::debug!("Unknown channel: {}", channel);
-                            }
-                        }
-                    }
-
-                    SignalingMessage::WebRtcError { session_id, code, message } => {
-                        tracing::error!("❌ WebRTC error for session {}: {} - {}", session_id, code, message);
-                        let webrtc = webrtc_manager.clone();
-                        
-                        tokio::spawn(async move {
-                            let _ = webrtc.close_session(&session_id).await;
-                        });
                     }
 
                     _ => {

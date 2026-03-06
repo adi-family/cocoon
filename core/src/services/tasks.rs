@@ -15,7 +15,7 @@ use crate::adi_router::{
 };
 use tasks_core::{CreateTask, Task, TaskId, TaskManager, TaskStatus};
 use async_trait::async_trait;
-use lib_signaling_protocol::{AdiMethodInfo, AdiServiceCapabilities};
+use crate::protocol::types::{AdiMethodInfo, AdiServiceCapabilities};
 use serde_json::{json, Value as JsonValue};
 use std::path::Path;
 use std::sync::Arc;

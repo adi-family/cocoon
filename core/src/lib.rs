@@ -1,3 +1,31 @@
+pub mod protocol {
+    include!(concat!(env!("OUT_DIR"), "/generated_protocol.rs"));
+}
+
+impl Default for protocol::types::AdiMethodInfo {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            description: String::new(),
+            streaming: false,
+            params_schema: None,
+            result_schema: None,
+            deprecated: None,
+            deprecated_message: None,
+        }
+    }
+}
+
+impl Default for protocol::types::AdiServiceCapabilities {
+    fn default() -> Self {
+        Self {
+            subscriptions: false,
+            notifications: false,
+            streaming: false,
+        }
+    }
+}
+
 pub mod adi_router;
 mod core;
 pub mod filesystem;

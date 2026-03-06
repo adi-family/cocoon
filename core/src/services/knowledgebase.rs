@@ -8,7 +8,7 @@ use crate::adi_router::{
 };
 use async_trait::async_trait;
 use kb_core::{EdgeType, Knowledgebase, NodeType};
-use lib_signaling_protocol::{AdiMethodInfo, AdiServiceCapabilities};
+use crate::protocol::types::{AdiMethodInfo, AdiServiceCapabilities};
 use serde_json::{json, Value as JsonValue};
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};

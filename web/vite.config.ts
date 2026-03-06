@@ -12,6 +12,10 @@ export default defineConfig({
         __dirname,
         "../../debug-screen/web/src/bus/index.ts",
       ),
+      "@adi/router-web-plugin/bus": path.resolve(
+        __dirname,
+        "../../router/web/src/bus/index.ts",
+      ),
     },
   },
   build: {

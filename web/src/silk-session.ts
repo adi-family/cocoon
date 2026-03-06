@@ -41,7 +41,7 @@ export class SilkSession {
     const cmd = new SilkCommand(id, this.sessionId, (req) => this.sendSilk(req));
     this.commands.set(id, cmd);
     this.sendSilk({
-      type: 'execute',
+      type: 'silk_execute',
       session_id: this.sessionId,
       command,
       command_id: id,
@@ -55,7 +55,7 @@ export class SilkSession {
   close(): void {
     if (this._closed) return;
     this.sendSilk({
-      type: 'close_session',
+      type: 'silk_close_session',
       session_id: this.sessionId,
     });
   }
@@ -68,22 +68,22 @@ export class SilkSession {
   /** @internal Called by CocoonClient to route responses into this session. */
   _handleResponse(response: SilkResponse): void {
     switch (response.type) {
-      case 'output': {
+      case 'silk_output': {
         const cmd = this.commands.get(response.command_id);
         if (cmd) cmd._emitOutput(response.stream, response.data, response.html);
         break;
       }
-      case 'pty_output': {
+      case 'silk_pty_output': {
         const cmd = this.commands.get(response.command_id);
         if (cmd) cmd._emitPtyOutput(response.data);
         break;
       }
-      case 'interactive_required': {
+      case 'silk_interactive_required': {
         const cmd = this.commands.get(response.command_id);
         if (cmd) cmd._emitInteractiveRequired(response.reason, response.pty_session_id);
         break;
       }
-      case 'command_completed': {
+      case 'silk_command_completed': {
         const cmd = this.commands.get(response.command_id);
         if (cmd) {
           cmd._emitCompleted(response.exit_code, response.cwd);
@@ -92,14 +92,14 @@ export class SilkSession {
         }
         break;
       }
-      case 'error': {
+      case 'silk_error': {
         if (response.command_id) {
           const cmd = this.commands.get(response.command_id);
           if (cmd) cmd._emitError(response.code, response.message);
         }
         break;
       }
-      case 'session_closed':
+      case 'silk_session_closed':
         this._closed = true;
         for (const cmd of this.commands.values()) cmd.dispose();
         this.commands.clear();

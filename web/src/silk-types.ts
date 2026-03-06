@@ -1,27 +1,26 @@
+// Re-export generated types as the single source of truth
+export type { SilkStream, SilkSignal, SilkHtmlSpan } from './generated';
+export type { SignalingMessage as CocoonMessage } from './generated';
+
+// Extract silk-specific message subsets for typed usage
+import type { SignalingMessage } from './generated';
+
+type ExtractSilk<T extends SignalingMessage, P extends string> = T extends { type: `silk_${P}` } ? T : never;
+
 export type SilkRequest =
-  | { type: 'create_session'; cwd?: string; env?: Record<string, string>; shell?: string }
-  | { type: 'execute'; session_id: string; command: string; command_id: string; cols?: number; rows?: number; env?: Record<string, string> }
-  | { type: 'input'; session_id: string; command_id: string; data: string }
-  | { type: 'resize'; session_id: string; command_id: string; cols: number; rows: number }
-  | { type: 'signal'; session_id: string; command_id: string; signal: SilkSignal }
-  | { type: 'close_session'; session_id: string };
-
-export type SilkSignal = 'interrupt' | 'terminate' | 'kill';
-
-export type SilkStream = 'stdout' | 'stderr';
-
-export interface SilkHtmlSpan {
-  text: string;
-  classes?: string[];
-  styles?: Record<string, string>;
-}
+  | ExtractSilk<SignalingMessage, 'create_session'>
+  | ExtractSilk<SignalingMessage, 'execute'>
+  | ExtractSilk<SignalingMessage, 'input'>
+  | ExtractSilk<SignalingMessage, 'resize'>
+  | ExtractSilk<SignalingMessage, 'signal'>
+  | ExtractSilk<SignalingMessage, 'close_session'>;
 
 export type SilkResponse =
-  | { type: 'session_created'; session_id: string; cwd: string; shell: string }
-  | { type: 'command_started'; session_id: string; command_id: string; interactive: boolean }
-  | { type: 'output'; session_id: string; command_id: string; stream: SilkStream; data: string; html?: SilkHtmlSpan[] }
-  | { type: 'interactive_required'; session_id: string; command_id: string; reason: string; pty_session_id: string }
-  | { type: 'pty_output'; session_id: string; command_id: string; pty_session_id: string; data: string }
-  | { type: 'command_completed'; session_id: string; command_id: string; exit_code: number; cwd: string }
-  | { type: 'session_closed'; session_id: string }
-  | { type: 'error'; session_id?: string; command_id?: string; code: string; message: string };
+  | ExtractSilk<SignalingMessage, 'create_session_response'>
+  | ExtractSilk<SignalingMessage, 'command_started'>
+  | ExtractSilk<SignalingMessage, 'output'>
+  | ExtractSilk<SignalingMessage, 'interactive_required'>
+  | ExtractSilk<SignalingMessage, 'pty_output'>
+  | ExtractSilk<SignalingMessage, 'command_completed'>
+  | ExtractSilk<SignalingMessage, 'session_closed'>
+  | ExtractSilk<SignalingMessage, 'error'>;

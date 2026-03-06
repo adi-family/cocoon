@@ -15,15 +15,53 @@
 //! - Optional subscription support for real-time events
 
 use async_trait::async_trait;
-use lib_signaling_protocol::{
-    AdiDiscovery, AdiMethodInfo, AdiNotification, AdiRequest, AdiResponse,
-    AdiServiceCapabilities, AdiServiceInfo, AdiSubscription,
-};
+use crate::protocol::types::{AdiMethodInfo, AdiServiceCapabilities, AdiServiceInfo};
+use serde::{Serialize, Deserialize};
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, RwLock};
 use uuid::Uuid;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdiRequest {
+    pub request_id: Uuid,
+    pub service: String,
+    pub method: String,
+    pub params: JsonValue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AdiResponse {
+    Success { request_id: Uuid, service: String, method: String, data: JsonValue },
+    Error { request_id: Uuid, service: String, method: String, code: String, message: String },
+    ServiceNotFound { request_id: Uuid, service: String },
+    MethodNotFound { request_id: Uuid, service: String, method: String, available_methods: Vec<String> },
+    Stream { request_id: Uuid, service: String, method: String, data: JsonValue, seq: u32, done: bool },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AdiDiscovery {
+    ListServices { request_id: Uuid },
+    ServicesList { request_id: Uuid, services: Vec<AdiServiceInfo> },
+}
+
+#[derive(Debug, Clone)]
+pub enum AdiNotification {
+    ServicesChanged { added: Vec<String>, removed: Vec<String>, updated: Vec<String> },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AdiSubscription {
+    Subscribe { request_id: Uuid, service: String, event: String, filter: Option<JsonValue> },
+    Subscribed { request_id: Uuid, subscription_id: Uuid, service: String, event: String },
+    Unsubscribe { subscription_id: Uuid },
+    Unsubscribed { subscription_id: Uuid },
+    Error { request_id: Uuid, code: String, message: String },
+}
 
 /// Result of handling a service request
 pub enum AdiHandleResult {

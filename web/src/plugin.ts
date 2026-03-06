@@ -1,9 +1,11 @@
 import "@adi/signaling-web-plugin";
 import { AdiPlugin } from '@adi-family/sdk-plugin';
 import { AdiDebugScreenBusKey } from '@adi/debug-screen-web-plugin/bus';
+import { AdiRouterBusKey } from '@adi/router-web-plugin/bus';
 import { CocoonClient } from './cocoon-client';
 import { PLUGIN_ID, PLUGIN_VERSION } from './config';
 import type { AdiCocoonDebugElement, CocoonDebugInfo } from './debug-section';
+import type { AdiCocoonListElement, CocoonListItem } from './component';
 import './bus';
 
 export interface CocoonApi {
@@ -19,7 +21,8 @@ export class CocoonPlugin extends AdiPlugin implements CocoonApi {
 
   private readonly clients = new Map<string, CocoonClient>();
   private debugEl: AdiCocoonDebugElement | null = null;
-  private readonly debugUnsubs: (() => void)[] = [];
+  private listEl: AdiCocoonListElement | null = null;
+  private readonly unsubs: (() => void)[] = [];
 
   get api(): CocoonApi {
     return this;
@@ -42,7 +45,7 @@ export class CocoonPlugin extends AdiPlugin implements CocoonApi {
 
     const client = new CocoonClient(cocoonId, server, this.bus);
     this.clients.set(cocoonId, client);
-    this.syncDebug();
+    this.syncViews();
     return client;
   }
 
@@ -51,11 +54,30 @@ export class CocoonPlugin extends AdiPlugin implements CocoonApi {
     if (!client) return;
     client.dispose();
     this.clients.delete(cocoonId);
-    this.syncDebug();
+    this.syncViews();
   }
 
   override async onRegister(): Promise<void> {
-    await import('./debug-section.js');
+    const [, { AdiCocoonListElement }] = await Promise.all([
+      import('./debug-section.js'),
+      import('./component.js'),
+    ]);
+
+    if (!customElements.get('adi-cocoon-list')) {
+      customElements.define('adi-cocoon-list', AdiCocoonListElement);
+    }
+
+    this.bus.emit(AdiRouterBusKey.RegisterRoute, {
+      pluginId: PLUGIN_ID,
+      path: '',
+      init: () => {
+        this.listEl = document.createElement('adi-cocoon-list') as AdiCocoonListElement;
+        this.syncList();
+        return this.listEl;
+      },
+      label: 'Cocoons',
+    }, PLUGIN_ID);
+
     this.bus.emit(
       AdiDebugScreenBusKey.RegisterSection,
       {
@@ -70,18 +92,23 @@ export class CocoonPlugin extends AdiPlugin implements CocoonApi {
       PLUGIN_ID,
     );
 
-    this.debugUnsubs.push(
-      this.bus.on('cocoon:session-created', () => this.syncDebug(), PLUGIN_ID),
-      this.bus.on('cocoon:session-closed', () => this.syncDebug(), PLUGIN_ID),
-      this.bus.on('cocoon:error', () => this.syncDebug(), PLUGIN_ID),
+    this.unsubs.push(
+      this.bus.on('cocoon:session-created', () => this.syncViews(), PLUGIN_ID),
+      this.bus.on('cocoon:session-closed', () => this.syncViews(), PLUGIN_ID),
+      this.bus.on('cocoon:error', () => this.syncViews(), PLUGIN_ID),
     );
   }
 
   override onUnregister(): void {
-    this.debugUnsubs.forEach((fn) => fn());
-    this.debugUnsubs.length = 0;
+    this.unsubs.forEach((fn) => fn());
+    this.unsubs.length = 0;
     for (const client of this.clients.values()) client.dispose();
     this.clients.clear();
+  }
+
+  private syncViews(): void {
+    this.syncDebug();
+    this.syncList();
   }
 
   private syncDebug(): void {
@@ -91,5 +118,20 @@ export class CocoonPlugin extends AdiPlugin implements CocoonApi {
       infos.push({ cocoonId, sessions: client.allSessions().size });
     }
     this.debugEl.cocoons = infos;
+  }
+
+  private syncList(): void {
+    if (!this.listEl) return;
+    const items: CocoonListItem[] = [];
+    for (const [cocoonId, client] of this.clients) {
+      const sessions = [...client.allSessions().values()].map(s => ({
+        sessionId: s.sessionId,
+        cwd: s.cwd,
+        shell: s.shell,
+        closed: s.closed,
+      }));
+      items.push({ cocoonId, sessionCount: sessions.length, sessions });
+    }
+    this.listEl.cocoons = items;
   }
 }

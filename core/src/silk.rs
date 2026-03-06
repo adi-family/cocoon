@@ -4,7 +4,7 @@
 //! executes commands, and returns output as structured data with ANSI-to-HTML conversion.
 //! Interactive commands are automatically detected and spawned in a separate PTY.
 
-use lib_signaling_protocol::SilkHtmlSpan;
+use crate::protocol::types::SilkHtmlSpan;
 use std::collections::HashMap;
 use std::process::{Child, Command, Stdio};
 use uuid::Uuid;
@@ -235,8 +235,8 @@ impl AnsiToHtml {
                 if !current_text.is_empty() {
                     spans.push(SilkHtmlSpan {
                         text: current_text.clone(),
-                        classes: current_classes.clone(),
-                        styles: current_styles.clone(),
+                        classes: if current_classes.is_empty() { None } else { Some(current_classes.clone()) },
+                        styles: if current_styles.is_empty() { None } else { Some(current_styles.clone()) },
                     });
                     current_text.clear();
                 }
@@ -268,8 +268,8 @@ impl AnsiToHtml {
         if !current_text.is_empty() {
             spans.push(SilkHtmlSpan {
                 text: current_text,
-                classes: current_classes,
-                styles: current_styles,
+                classes: if current_classes.is_empty() { None } else { Some(current_classes) },
+                styles: if current_styles.is_empty() { None } else { Some(current_styles) },
             });
         }
 
@@ -408,8 +408,8 @@ mod tests {
         let spans = AnsiToHtml::convert("hello world");
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].text, "hello world");
-        assert!(spans[0].classes.is_empty());
-        assert!(spans[0].styles.is_empty());
+        assert!(spans[0].classes.is_none());
+        assert!(spans[0].styles.is_none());
     }
 
     #[test]
@@ -417,9 +417,9 @@ mod tests {
         let spans = AnsiToHtml::convert("\x1b[1mBOLD\x1b[0m normal");
         assert_eq!(spans.len(), 2);
         assert_eq!(spans[0].text, "BOLD");
-        assert!(spans[0].classes.contains(&"bold".to_string()));
+        assert!(spans[0].classes.as_ref().unwrap().contains(&"bold".to_string()));
         assert_eq!(spans[1].text, " normal");
-        assert!(spans[1].classes.is_empty());
+        assert!(spans[1].classes.is_none());
     }
 
     #[test]
@@ -427,7 +427,7 @@ mod tests {
         let spans = AnsiToHtml::convert("\x1b[31mRED\x1b[0m");
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].text, "RED");
-        assert_eq!(spans[0].styles.get("color"), Some(&"#cc0000".to_string()));
+        assert_eq!(spans[0].styles.as_ref().unwrap().get("color"), Some(&"#cc0000".to_string()));
     }
 
     #[test]
@@ -435,7 +435,7 @@ mod tests {
         let spans = AnsiToHtml::convert("\x1b[1;32mBOLD GREEN\x1b[0m");
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].text, "BOLD GREEN");
-        assert!(spans[0].classes.contains(&"bold".to_string()));
-        assert_eq!(spans[0].styles.get("color"), Some(&"#00cc00".to_string()));
+        assert!(spans[0].classes.as_ref().unwrap().contains(&"bold".to_string()));
+        assert_eq!(spans[0].styles.as_ref().unwrap().get("color"), Some(&"#00cc00".to_string()));
     }
 }

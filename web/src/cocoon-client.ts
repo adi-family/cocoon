@@ -77,7 +77,7 @@ export class CocoonClient {
       );
 
       this.server.sendSyncData({
-        type: 'create_session',
+        type: 'silk_create_session',
         cwd: opts?.cwd,
         env: opts?.env,
         shell: opts?.shell,
@@ -99,7 +99,7 @@ export class CocoonClient {
     const cocoonId = this.cocoonId;
 
     switch (response.type) {
-      case 'session_created':
+      case 'silk_create_session_response':
         this.bus.emit(
           CocoonBusKey.SessionCreated,
           { cocoonId, sessionId: response.session_id, cwd: response.cwd, shell: response.shell },
@@ -107,7 +107,7 @@ export class CocoonClient {
         );
         break;
 
-      case 'session_closed': {
+      case 'silk_session_closed': {
         const session = this.sessions.get(response.session_id);
         if (session) {
           session._handleResponse(response);
@@ -122,17 +122,17 @@ export class CocoonClient {
         break;
       }
 
-      case 'output':
-      case 'pty_output':
-      case 'interactive_required':
-      case 'command_started':
-      case 'command_completed': {
+      case 'silk_output':
+      case 'silk_pty_output':
+      case 'silk_interactive_required':
+      case 'silk_command_started':
+      case 'silk_command_completed': {
         const session = this.sessions.get(response.session_id);
         if (session) session._handleResponse(response);
         break;
       }
 
-      case 'error': {
+      case 'silk_error': {
         if (response.session_id) {
           const session = this.sessions.get(response.session_id);
           if (session) session._handleResponse(response);

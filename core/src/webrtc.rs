@@ -16,9 +16,10 @@
 //!
 //! If no ICE servers are configured, defaults to Google's public STUN server.
 
-use crate::adi_router::{AdiRouter, AdiRouterResult};
+use crate::adi_router::{AdiDiscovery, AdiRequest, AdiResponse, AdiRouter, AdiRouterResult};
 use crate::filesystem::{FileSystemRequest, handle_request as handle_fs_request};
-use lib_signaling_protocol::{AdiDiscovery, AdiRequest, AdiResponse, SignalingMessage};
+use crate::protocol::messages::CocoonMessage;
+use lib_signaling_protocol::SignalingMessage;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
@@ -233,11 +234,13 @@ impl WebRtcManager {
                             json.sdp_mid
                         );
 
-                        let _ = tx.send(SignalingMessage::WebRtcIceCandidate {
-                            session_id,
-                            candidate: json.candidate,
-                            sdp_mid: json.sdp_mid,
-                            sdp_mline_index: json.sdp_mline_index.map(|i| i as u32),
+                        let _ = tx.send(SignalingMessage::SyncData {
+                            payload: serde_json::to_value(&CocoonMessage::WebrtcIceCandidate {
+                                session_id,
+                                candidate: json.candidate,
+                                sdp_mid: json.sdp_mid,
+                                sdp_mline_index: json.sdp_mline_index.map(|i| i as i32),
+                            }).unwrap(),
                         });
                     }
                 } else {
@@ -309,9 +312,11 @@ impl WebRtcManager {
                             _ => "unknown",
                         };
 
-                        let _ = tx.send(SignalingMessage::WebRtcSessionEnded {
-                            session_id: session_id.clone(),
-                            reason: Some(reason.to_string()),
+                        let _ = tx.send(SignalingMessage::SyncData {
+                            payload: serde_json::to_value(&CocoonMessage::WebrtcSessionEnded {
+                                session_id: session_id.clone(),
+                                reason: Some(reason.to_string()),
+                            }).unwrap(),
                         });
 
                         sessions.lock().await.remove(&session_id);
@@ -509,11 +514,13 @@ impl WebRtcManager {
                         }
 
                         // Forward other channels through signaling (for processing)
-                        let _ = tx.send(SignalingMessage::WebRtcData {
-                            session_id,
-                            channel,
-                            data,
-                            binary,
+                        let _ = tx.send(SignalingMessage::SyncData {
+                            payload: serde_json::to_value(&CocoonMessage::WebrtcData {
+                                session_id,
+                                channel,
+                                data,
+                                binary,
+                            }).unwrap(),
                         });
                     })
                 }));

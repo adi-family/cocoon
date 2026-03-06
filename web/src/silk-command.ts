@@ -47,7 +47,7 @@ export class SilkCommand {
 
   input(data: string): void {
     this.send({
-      type: 'input',
+      type: 'silk_input',
       session_id: this.sessionId,
       command_id: this.commandId,
       data,
@@ -56,7 +56,7 @@ export class SilkCommand {
 
   resize(cols: number, rows: number): void {
     this.send({
-      type: 'resize',
+      type: 'silk_resize',
       session_id: this.sessionId,
       command_id: this.commandId,
       cols,
@@ -66,7 +66,7 @@ export class SilkCommand {
 
   signal(signal: SilkSignal): void {
     this.send({
-      type: 'signal',
+      type: 'silk_signal',
       session_id: this.sessionId,
       command_id: this.commandId,
       signal,
