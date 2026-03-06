@@ -74,6 +74,9 @@ pub async fn run_setup(port: u16, cli_url: Option<String>) -> Result<String, Str
         if !req.token.is_empty() {
             env.push(("COCOON_SETUP_TOKEN", &req.token));
         }
+        if !req.auth_token.is_empty() {
+            env.push(("COCOON_AUTH_TOKEN", &req.auth_token));
+        }
 
         // Start cocoon via ADI daemon with the signaling URL injected
         match crate::start_cocoon_daemon(&env).await {
@@ -103,6 +106,8 @@ struct SetupServerState {
 #[derive(serde::Deserialize)]
 struct ConnectRequest {
     token: String,
+    #[serde(default)]
+    auth_token: String,
     #[serde(default = "default_signaling_url")]
     signaling_url: String,
 }

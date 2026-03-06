@@ -5,7 +5,7 @@ import { AdiRouterBusKey } from '@adi/router-web-plugin/bus';
 import { CocoonClient } from './cocoon-client';
 import { PLUGIN_ID, PLUGIN_VERSION } from './config';
 import type { AdiCocoonDebugElement, CocoonDebugInfo } from './debug-section';
-import type { AdiCocoonListElement, CocoonListItem } from './component';
+import type { AdiCocoonListElement, CocoonListItem, SetupConnectEvent, AuthTokenProvider } from './component';
 import './bus';
 
 export interface CocoonApi {
@@ -72,6 +72,14 @@ export class CocoonPlugin extends AdiPlugin implements CocoonApi {
       path: '',
       init: () => {
         this.listEl = document.createElement('adi-cocoon-list') as AdiCocoonListElement;
+        this.listEl.authTokenProvider = () => this.getAuthToken();
+        this.listEl.addEventListener('setup-connect', ((e: CustomEvent<SetupConnectEvent>) => {
+          const url = e.detail.signalingUrl;
+          const signalingApi = this.app.api('adi.signaling');
+          if (!signalingApi.getServer(url)) {
+            signalingApi.addServer(url);
+          }
+        }) as EventListener);
         this.syncList();
         return this.listEl;
       },
@@ -120,6 +128,37 @@ export class CocoonPlugin extends AdiPlugin implements CocoonApi {
     this.debugEl.cocoons = infos;
   }
 
+  private getAuthToken(): Promise<string | null> {
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => resolve(null), 3000);
+
+      this.bus.once('auth:token-resolved', ({ token }) => {
+        clearTimeout(timeout);
+        resolve(token ?? null);
+      }, PLUGIN_ID);
+
+      // Get auth domain from first connected signaling server
+      const signalingApi = this.app.api('adi.signaling');
+      const servers = signalingApi.allServers();
+      const firstServer = servers.values().next().value;
+      if (!firstServer) {
+        clearTimeout(timeout);
+        resolve(null);
+        return;
+      }
+
+      // Derive auth domain from signaling URL (same origin, /api/auth path)
+      try {
+        const wsUrl = new URL(firstServer.url);
+        const authDomain = `${wsUrl.protocol === 'wss:' ? 'https:' : 'http:'}//${wsUrl.host}/api/auth`;
+        this.bus.emit('auth:get-token', { authDomain }, PLUGIN_ID);
+      } catch {
+        clearTimeout(timeout);
+        resolve(null);
+      }
+    });
+  }
+
   private syncList(): void {
     if (!this.listEl) return;
     const items: CocoonListItem[] = [];
@@ -133,5 +172,8 @@ export class CocoonPlugin extends AdiPlugin implements CocoonApi {
       items.push({ cocoonId, sessionCount: sessions.length, sessions });
     }
     this.listEl.cocoons = items;
+
+    const signalingApi = this.app.api('adi.signaling');
+    this.listEl.signalingUrls = [...signalingApi.allServers().keys()];
   }
 }

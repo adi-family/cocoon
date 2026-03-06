@@ -967,7 +967,12 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Get or create client secret and load device ID (for reconnection verification)
     let (secret, device_id) = get_or_create_secret().await?;
 
-    let signaling_url = env_or(EnvVar::SignalingServerUrl.as_str(), "ws://localhost:8080/ws");
+    let base_url = env_or(EnvVar::SignalingServerUrl.as_str(), "ws://localhost:8080/ws");
+    let signaling_url = if base_url.contains('?') {
+        format!("{}&kind=cocoon", base_url)
+    } else {
+        format!("{}?kind=cocoon", base_url)
+    };
 
     tracing::info!("🔗 Connecting to signaling server: {}", signaling_url);
 
@@ -1076,13 +1081,11 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     let services = Arc::new(services);
 
-    // Check for setup token (one-command install flow)
+    // Check for tokens (one-command install flow)
     let setup_token = env_opt(EnvVar::CocoonSetupToken.as_str());
     let cocoon_name = env_opt(EnvVar::CocoonName.as_str());
 
-    // Register with signaling server via DeviceRegister
-    // Setup token and name are passed via tags for auto-claim flow
-    let _secret_for_claiming = secret.clone();
+    // Build DeviceRegister message
     let cocoon_version = env!("CARGO_PKG_VERSION").to_string();
     let mut tags = std::collections::HashMap::new();
     if let Some(ref token) = setup_token {
@@ -1099,30 +1102,64 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         tags: if tags.is_empty() { None } else { Some(tags) },
     };
 
+    // Track current device ID for deregistration
+    let current_device_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+
+    // Send DeviceRegister immediately (cocoon endpoint skips auth)
+    tracing::info!("⏳ Registering with signaling server...");
     {
         let mut w = writer.lock().await;
-        if let Err(e) = w
-            .send(Message::Text(
-                serde_json::to_string(&register_msg)
-                    .expect("SignalingMessage serialization cannot fail"),
-            ))
-            .await
-        {
-            tracing::error!("❌ Failed to register: {}", e);
-            return Err(format!("Failed to send registration message: {}", e).into());
+        w.send(Message::Text(
+            serde_json::to_string(&register_msg).unwrap(),
+        ))
+        .await
+        .map_err(|e| format!("Failed to send register: {}", e))?;
+    }
+
+    // Wait for DeviceRegisterResponse
+    let mut registered = false;
+    while let Some(Ok(msg)) = read.next().await {
+        let text = match msg {
+            Message::Text(t) => t,
+            Message::Close(_) => return Err("Connection closed during registration".into()),
+            _ => continue,
+        };
+        let parsed: SignalingMessage = match serde_json::from_str(&text) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        match parsed {
+            SignalingMessage::DeviceRegisterResponse { device_id: assigned_id, tags } => {
+                registered = true;
+                tracing::info!("✅ Registration confirmed");
+                tracing::info!("🆔 Device ID: {}", assigned_id);
+
+                if let Some(ref t) = tags {
+                    if let Some(owner_id) = t.get("owner_id") {
+                        tracing::info!("👤 Owner: {}", owner_id);
+                        if let Some(name) = t.get("name") {
+                            tracing::info!("📛 Name: {}", name);
+                        }
+                        tracing::info!("🎉 Cocoon is ready and claimed by your account!");
+                    }
+                }
+
+                save_device_id(&assigned_id).await;
+                *current_device_id.lock().await = Some(assigned_id);
+                break;
+            }
+            SignalingMessage::SystemError { message } => {
+                tracing::error!("❌ Server error during registration: {}", message);
+                return Err(format!("Server error: {}", message).into());
+            }
+            _ => continue,
         }
     }
 
-    if setup_token.is_some() {
-        tracing::info!("⏳ Registering with setup token (auto-claim enabled)...");
-    } else if device_id.is_some() {
-        tracing::info!("⏳ Reconnecting with device ID verification...");
-    } else {
-        tracing::info!("⏳ Waiting for derived device ID (first registration)...");
+    if !registered {
+        return Err("Connection closed before registration completed".into());
     }
 
-    // Track current device ID for deregistration
-    let current_device_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let current_device_id_for_loop = current_device_id.clone();
 
     // Setup shutdown signal handling
