@@ -1,4 +1,5 @@
-import "@adi/signaling-web-plugin";
+import '@adi/auth-web-plugin';
+import '@adi/signaling-web-plugin';
 import { AdiPlugin } from '@adi-family/sdk-plugin';
 import { AdiDebugScreenBusKey } from '@adi/debug-screen-web-plugin/bus';
 import { AdiRouterBusKey } from '@adi/router-web-plugin/bus';
@@ -128,35 +129,18 @@ export class CocoonPlugin extends AdiPlugin implements CocoonApi {
     this.debugEl.cocoons = infos;
   }
 
-  private getAuthToken(): Promise<string | null> {
-    return new Promise((resolve) => {
-      const timeout = setTimeout(() => resolve(null), 3000);
+  private async getAuthToken(): Promise<string | null> {
+    const signalingApi = this.app.api('adi.signaling');
+    const firstServer = signalingApi.allServers().values().next().value;
+    if (!firstServer) return null;
 
-      this.bus.once('auth:token-resolved', ({ token }) => {
-        clearTimeout(timeout);
-        resolve(token ?? null);
-      }, PLUGIN_ID);
-
-      // Get auth domain from first connected signaling server
-      const signalingApi = this.app.api('adi.signaling');
-      const servers = signalingApi.allServers();
-      const firstServer = servers.values().next().value;
-      if (!firstServer) {
-        clearTimeout(timeout);
-        resolve(null);
-        return;
-      }
-
-      // Derive auth domain from signaling URL (same origin, /api/auth path)
-      try {
-        const wsUrl = new URL(firstServer.url);
-        const authDomain = `${wsUrl.protocol === 'wss:' ? 'https:' : 'http:'}//${wsUrl.host}/api/auth`;
-        this.bus.emit('auth:get-token', { authDomain }, PLUGIN_ID);
-      } catch {
-        clearTimeout(timeout);
-        resolve(null);
-      }
-    });
+    try {
+      const wsUrl = new URL(firstServer.url);
+      const authDomain = `${wsUrl.protocol === 'wss:' ? 'https:' : 'http:'}//${wsUrl.host}/api/auth`;
+      return await this.app.api('adi.auth').getToken(authDomain);
+    } catch {
+      return null;
+    }
   }
 
   private syncList(): void {
