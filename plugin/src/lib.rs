@@ -52,7 +52,7 @@ async fn start_cocoon_daemon(
             .map_err(|e| format!("Failed to get exe path: {}", e))?;
         let mut cfg = lib_daemon_client::ServiceConfig::new(exe.display().to_string())
             .args(["daemon", "run-service", "adi.cocoon"])
-            .env("RUST_LOG", "trace");
+            .env("RUST_LOG", "info,webrtc_ice=warn,webrtc_sctp=warn,webrtc_dtls=warn,webrtc_mdns=warn");
         for &(key, value) in extra_env {
             cfg = cfg.env(key, value);
         }

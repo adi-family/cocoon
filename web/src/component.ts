@@ -279,7 +279,7 @@ export class AdiCocoonListElement extends LitElement {
               <span>Setup failed: ${this.setupError}</span>
             </div>
             <div>
-              <button style="${'padding: 6px 12px; border: 1px solid var(--border-color, #333); border-radius: 6px; background: transparent; color: inherit; font-size: 0.85rem; cursor: pointer;'}" @click=${() => this.startSetup()}>Retry</button>
+              <button style="padding: 6px 12px; border: 1px solid var(--border-color, #333); border-radius: 6px; background: transparent; color: inherit; font-size: 0.85rem; cursor: pointer;" @click=${() => this.startSetup()}>Retry</button>
             </div>
           </div>
         </div>

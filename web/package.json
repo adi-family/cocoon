@@ -15,11 +15,11 @@
     "dev": "vite build --watch"
   },
   "dependencies": {
-    "@adi/auth-web-plugin": "file:../../auth/web",
-    "@adi/signaling-web-plugin": "file:../../signaling/web",
-    "@adi/router-web-plugin": "file:../../router/web",
-    "@adi/debug-screen-web-plugin": "file:../../debug-screen/web",
     "@adi-family/sdk-plugin": "file:../../../packages/plugin-sdk",
+    "@adi/auth-web-plugin": "file:../../auth/web",
+    "@adi/debug-screen-web-plugin": "file:../../debug-screen/web",
+    "@adi/router-web-plugin": "file:../../router/web",
+    "@adi/signaling-web-plugin": "file:../../signaling/web",
     "lit": "^3.3.1"
   },
   "devDependencies": {

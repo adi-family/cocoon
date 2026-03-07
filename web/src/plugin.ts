@@ -5,6 +5,7 @@ import { AdiDebugScreenBusKey } from '@adi/debug-screen-web-plugin/bus';
 import { AdiSignalingBusKey, type DeviceInfo } from '@adi/signaling-web-plugin/bus';
 import { AdiRouterBusKey } from '@adi/router-web-plugin/bus';
 import { CocoonClient } from './cocoon-client';
+import type { WebRTCConfig } from './cocoon-webrtc';
 import { PLUGIN_ID, PLUGIN_VERSION } from './config';
 import type { AdiCocoonDebugElement, CocoonDebugInfo } from './debug-section';
 import type { AdiCocoonListElement, CocoonListItem, SetupConnectEvent } from './component';
@@ -13,7 +14,7 @@ import './bus';
 export interface CocoonApi {
   getClient(cocoonId: string): CocoonClient | undefined;
   allClients(): ReadonlyMap<string, CocoonClient>;
-  createClient(cocoonId: string, signalingUrl: string): CocoonClient | undefined;
+  createClient(cocoonId: string, signalingUrl: string, rtcConfig?: WebRTCConfig): CocoonClient | undefined;
   removeClient(cocoonId: string): void;
 }
 
@@ -39,14 +40,14 @@ export class CocoonPlugin extends AdiPlugin implements CocoonApi {
     return this.clients;
   }
 
-  createClient(cocoonId: string, signalingUrl: string): CocoonClient | undefined {
+  createClient(cocoonId: string, signalingUrl: string, rtcConfig?: WebRTCConfig): CocoonClient | undefined {
     if (this.clients.has(cocoonId)) return this.clients.get(cocoonId);
 
     const signalingApi = this.app.api('adi.signaling');
     const server = signalingApi.getServer(signalingUrl);
     if (!server) return undefined;
 
-    const client = new CocoonClient(cocoonId, server, this.bus);
+    const client = new CocoonClient(cocoonId, server, this.bus, rtcConfig);
     this.clients.set(cocoonId, client);
     this.syncViews();
     return client;

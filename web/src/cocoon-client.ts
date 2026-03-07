@@ -2,6 +2,7 @@ import "@adi/signaling-web-plugin/bus";
 import { Logger, trace, type EventBus } from '@adi-family/sdk-plugin';
 import type { SilkResponse } from './silk-types';
 import { SilkSession } from './silk-session';
+import { CocoonWebRTC, type WebRTCConfig } from './cocoon-webrtc';
 import { CocoonBusKey } from './bus';
 import './bus';
 
@@ -21,23 +22,19 @@ export class CocoonClient {
   }));
   private readonly bus: EventBus;
   private readonly server: SyncDataSender;
+  private readonly webrtc: CocoonWebRTC;
   private readonly sessions = new Map<string, SilkSession>();
   private readonly unsubs: (() => void)[] = [];
 
-  constructor(cocoonId: string, server: SyncDataSender, bus: EventBus) {
+  constructor(cocoonId: string, server: SyncDataSender, bus: EventBus, rtcConfig?: WebRTCConfig) {
     this.cocoonId = cocoonId;
     this.bus = bus;
     this.server = server;
+    this.webrtc = new CocoonWebRTC(cocoonId, server, bus, rtcConfig);
 
+    // Route silk responses from WebRTC data channel to session handlers
     this.unsubs.push(
-      bus.on(
-        'signaling:sync-data',
-        ({ url, payload }) => {
-          if (url !== server.url) return;
-          this.handleSyncData(payload);
-        },
-        SOURCE,
-      ),
+      this.webrtc.onMessage((msg) => this.handleSilkMsg(msg)),
     );
   }
 
@@ -50,17 +47,28 @@ export class CocoonClient {
   }
 
   @trace('creating silk session')
-  createSession(opts?: { cwd?: string; env?: Record<string, string>; shell?: string }): Promise<SilkSession> {
+  async createSession(opts?: { cwd?: string; env?: Record<string, string>; shell?: string }): Promise<SilkSession> {
+    // Ensure WebRTC data channel is open before sending
+    console.log(`[CocoonClient] createSession: connecting WebRTC for cocoon=${this.cocoonId}`);
+    await this.webrtc.connect();
+    console.log(`[CocoonClient] createSession: WebRTC connected, sending silk_create_session`);
+
     return new Promise((resolve, reject) => {
       const cleanup = (): void => { unsub1(); unsub2(); };
 
       const unsub1 = this.bus.on(
         CocoonBusKey.SessionCreated,
         (ev) => {
-          if (ev.cocoonId !== this.cocoonId) return;
+          console.log(`[CocoonClient] SessionCreated event received: cocoonId=${ev.cocoonId} sessionId=${ev.sessionId}`);
+          if (ev.cocoonId !== this.cocoonId) {
+            console.log(`[CocoonClient] SessionCreated SKIPPED (cocoonId mismatch: ${ev.cocoonId} !== ${this.cocoonId})`);
+            return;
+          }
           cleanup();
-          const session = new SilkSession(ev.sessionId, this.cocoonId, ev.cwd, ev.shell, this.server);
+          const dcSender = this.makeDcSender();
+          const session = new SilkSession(ev.sessionId, this.cocoonId, ev.cwd, ev.shell, dcSender);
           this.sessions.set(ev.sessionId, session);
+          console.log(`[CocoonClient] createSession RESOLVED! sessionId=${ev.sessionId}`);
           resolve(session);
         },
         SOURCE,
@@ -69,6 +77,7 @@ export class CocoonClient {
       const unsub2 = this.bus.on(
         CocoonBusKey.Error,
         (ev) => {
+          console.error(`[CocoonClient] Error event received: cocoonId=${ev.cocoonId} message=${ev.message}`);
           if (ev.cocoonId !== this.cocoonId) return;
           cleanup();
           reject(new Error(ev.message));
@@ -76,30 +85,47 @@ export class CocoonClient {
         SOURCE,
       );
 
-      this.server.sendSyncData({
+      const msg = {
         type: 'silk_create_session',
         cwd: opts?.cwd,
         env: opts?.env,
         shell: opts?.shell,
-      });
+      };
+      console.log(`[CocoonClient] sending silk_create_session:`, msg);
+      this.webrtc.send(msg);
+      console.log(`[CocoonClient] silk_create_session sent, waiting for response...`);
     });
   }
 
   dispose(): void {
     for (const session of this.sessions.values()) session.dispose();
     this.sessions.clear();
+    this.webrtc.dispose();
     this.unsubs.forEach((fn) => fn());
     this.unsubs.length = 0;
   }
 
-  private handleSyncData(payload: unknown): void {
-    if (!payload || typeof payload !== 'object' || !('type' in payload)) return;
+  /** Creates a SyncDataSender backed by the WebRTC data channel. */
+  private makeDcSender(): SyncDataSender {
+    return {
+      url: this.server.url,
+      sendSyncData: (payload) => this.webrtc.send(payload),
+    };
+  }
+
+  private handleSilkMsg(payload: unknown): void {
+    if (!payload || typeof payload !== 'object' || !('type' in payload)) {
+      console.log(`[CocoonClient] handleSilkMsg: ignored non-object/no-type payload`, payload);
+      return;
+    }
 
     const response = payload as SilkResponse;
     const cocoonId = this.cocoonId;
+    console.log(`[CocoonClient] handleSilkMsg: type=${response.type} cocoon=${cocoonId}`);
 
     switch (response.type) {
       case 'silk_create_session_response':
+        console.log(`[CocoonClient] silk_create_session_response received! sessionId=${response.session_id} cwd=${response.cwd} shell=${response.shell}`);
         this.bus.emit(
           CocoonBusKey.SessionCreated,
           { cocoonId, sessionId: response.session_id, cwd: response.cwd, shell: response.shell },

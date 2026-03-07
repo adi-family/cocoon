@@ -48,46 +48,60 @@ enum QueryType {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type")]
 enum SilkResponse {
+    #[serde(rename = "silk_create_session_response")]
     SessionCreated {
         session_id: Uuid,
         cwd: String,
         shell: String,
     },
+    #[serde(rename = "silk_command_started")]
     CommandStarted {
         session_id: Uuid,
-        command_id: Uuid,
+        command_id: String,
         interactive: bool,
     },
+    #[serde(rename = "silk_output")]
     Output {
         session_id: Uuid,
-        command_id: Uuid,
+        command_id: String,
         stream: SilkStream,
         data: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         html: Option<Vec<SilkHtmlSpan>>,
     },
+    #[serde(rename = "silk_interactive_required")]
     InteractiveRequired {
         session_id: Uuid,
-        command_id: Uuid,
+        command_id: String,
         reason: String,
         pty_session_id: Uuid,
     },
+    #[serde(rename = "silk_command_completed")]
     CommandCompleted {
         session_id: Uuid,
-        command_id: Uuid,
+        command_id: String,
         exit_code: i32,
         cwd: String,
     },
+    #[serde(rename = "silk_session_closed")]
     SessionClosed {
         session_id: Uuid,
     },
+    #[serde(rename = "silk_pty_output")]
+    PtyOutput {
+        session_id: Uuid,
+        command_id: String,
+        pty_session_id: Uuid,
+        data: String,
+    },
+    #[serde(rename = "silk_error")]
     Error {
         #[serde(skip_serializing_if = "Option::is_none")]
         session_id: Option<Uuid>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        command_id: Option<Uuid>,
+        command_id: Option<String>,
         code: String,
         message: String,
     },
@@ -156,20 +170,20 @@ enum CommandRequest {
     SilkExecute {
         session_id: Uuid,
         command: String,
-        command_id: Uuid,
+        command_id: String,
     },
 
     /// Send input to running Silk command (for interactive mode)
     SilkInput {
         session_id: Uuid,
-        command_id: Uuid,
+        command_id: String,
         data: String,
     },
 
     /// Resize Silk interactive terminal
     SilkResize {
         session_id: Uuid,
-        command_id: Uuid,
+        command_id: String,
         cols: u16,
         rows: u16,
     },
@@ -1069,6 +1083,18 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // Serialized WebRTC message channel — processes signaling messages one at a time
+    // so create_session() always completes before handle_offer() runs for the same session.
+    let (webrtc_msg_tx, mut webrtc_msg_rx) =
+        tokio::sync::mpsc::unbounded_channel::<CocoonMessage>();
+    let webrtc_manager_for_task = webrtc_manager.clone();
+    let writer_for_webrtc_msgs = writer.clone();
+    tokio::spawn(async move {
+        while let Some(msg) = webrtc_msg_rx.recv().await {
+            handle_cocoon_webrtc(msg, webrtc_manager_for_task.clone(), writer_for_webrtc_msgs.clone()).await;
+        }
+    });
+
     // Service registry - parse from COCOON_SERVICES env var
     // Format: "service1:port1,service2:port2"
     // Example: "flowmap-api:8092,postgres:5432"
@@ -1305,11 +1331,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         if type_str.starts_with("webrtc_") {
                             match serde_json::from_value::<CocoonMessage>(payload) {
                                 Ok(cocoon_msg) => {
-                                    let webrtc = webrtc_manager.clone();
-                                    let writer_clone = writer.clone();
-                                    tokio::spawn(async move {
-                                        handle_cocoon_webrtc(cocoon_msg, webrtc, writer_clone).await;
-                                    });
+                                    let _ = webrtc_msg_tx.send(cocoon_msg);
                                     continue;
                                 }
                                 Err(e) => {
@@ -1508,7 +1530,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                             let mut silk_sessions = silk_sessions_clone.lock().await;
 
                             if let Some(session) = silk_sessions.get_mut(&session_id) {
-                                match session.execute(&command, command_id) {
+                                match session.execute(&command, command_id.clone()) {
                                     Ok((interactive, child_opt)) => {
                                         if interactive {
                                             // Need PTY for interactive command
@@ -1543,7 +1565,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                                                         .get_mut(&session_id)
                                                     {
                                                         s.set_pty_session(
-                                                            command_id,
+                                                            command_id.clone(),
                                                             pty_session_id,
                                                         );
                                                     }
@@ -1577,6 +1599,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                                             let writer_for_output = writer_clone.clone();
                                             let sessions_for_cwd = silk_sessions_clone.clone();
                                             let cmd_for_cwd = command.clone();
+                                            let command_id_for_spawn = command_id.clone();
 
                                             // Send started message
                                             let started = SilkResponse::CommandStarted {
@@ -1602,6 +1625,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
                                             // Spawn task to read output
                                             tokio::spawn(async move {
+                                                let command_id = command_id_for_spawn;
                                                 let mut stdout_reader = std::io::BufReader::new(
                                                     child.stdout.take().expect("child stdout is piped"),
                                                 );
@@ -1621,7 +1645,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                                                             let html = AnsiToHtml::convert(&data);
                                                             let output = SilkResponse::Output {
                                                                 session_id,
-                                                                command_id,
+                                                                command_id: command_id.clone(),
                                                                 stream: SilkStream::Stdout,
                                                                 data: data.clone(),
                                                                 html: Some(html),
@@ -1656,7 +1680,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                                                     let html = AnsiToHtml::convert(&data);
                                                     let output = SilkResponse::Output {
                                                         session_id,
-                                                        command_id,
+                                                        command_id: command_id.clone(),
                                                         stream: SilkStream::Stderr,
                                                         data: data.clone(),
                                                         html: Some(html),
@@ -1689,7 +1713,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                                                         sessions_for_cwd.lock().await;
                                                     if let Some(s) = sessions.get_mut(&session_id) {
                                                         s.update_cwd_if_cd(&cmd_for_cwd);
-                                                        s.complete_command(command_id);
+                                                        s.complete_command(command_id.clone());
 
                                                         let completed =
                                                             SilkResponse::CommandCompleted {

@@ -19,16 +19,22 @@
 use crate::adi_router::{AdiDiscovery, AdiRequest, AdiResponse, AdiRouter, AdiRouterResult};
 use crate::filesystem::{FileSystemRequest, handle_request as handle_fs_request};
 use crate::protocol::messages::CocoonMessage;
+use crate::protocol::types::SilkStream;
+use crate::silk::{AnsiToHtml, SilkSession};
 use lib_signaling_protocol::SignalingMessage;
+use portable_pty::PtySize;
 use std::collections::HashMap;
+use std::io::Read;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
+use uuid::Uuid;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
+use webrtc::ice_transport::ice_credential_type::RTCIceCredentialType;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::configuration::RTCConfiguration;
@@ -98,7 +104,7 @@ fn build_ice_servers() -> Vec<RTCIceServer> {
             urls: turn_urls,
             username: turn_username.unwrap_or_default(),
             credential: turn_credential.unwrap_or_default(),
-            ..Default::default()
+            credential_type: RTCIceCredentialType::Password,
         });
     }
 
@@ -112,6 +118,30 @@ fn build_ice_servers() -> Vec<RTCIceServer> {
     }
 
     ice_servers
+}
+
+/// PTY session for interactive silk commands over WebRTC data channel
+struct SilkPtySession {
+    id: Uuid,
+    pair: portable_pty::PtyPair,
+    #[allow(dead_code)]
+    child: Box<dyn portable_pty::Child + Send>,
+    writer: Box<dyn std::io::Write + Send>,
+}
+
+/// Shared state for silk data channel sessions
+struct SilkDcState {
+    silk_sessions: Mutex<HashMap<String, SilkSession>>,
+    pty_sessions: Mutex<HashMap<String, SilkPtySession>>,
+}
+
+impl SilkDcState {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            silk_sessions: Mutex::new(HashMap::new()),
+            pty_sessions: Mutex::new(HashMap::new()),
+        })
+    }
 }
 
 /// WebRTC session state
@@ -172,7 +202,11 @@ impl WebRtcManager {
 
     /// Create a new WebRTC peer connection for a session
     pub async fn create_session(&self, session_id: String) -> Result<(), String> {
+        tracing::info!("🔧 [create_session] START session_id={}", session_id);
+        tracing::info!("🔧 [create_session] current session count: {}", self.sessions.lock().await.len());
+
         let ice_servers = build_ice_servers();
+        tracing::info!("🔧 [create_session] ICE servers configured: {}", ice_servers.len());
         let config = RTCConfiguration {
             ice_servers,
             ..Default::default()
@@ -186,9 +220,8 @@ impl WebRtcManager {
         registry = register_default_interceptors(registry, &mut media_engine)
             .map_err(|e| format!("Failed to register interceptors: {}", e))?;
 
-        // Create a SettingEngine and enable Detach mode for data channels
-        let mut setting_engine = SettingEngine::default();
-        setting_engine.detach_data_channels();
+        let setting_engine = SettingEngine::default();
+        tracing::info!("🔧 [create_session] SettingEngine created (default, no detach_data_channels)");
 
         // Create the API
         let api = APIBuilder::new()
@@ -197,12 +230,15 @@ impl WebRtcManager {
             .with_setting_engine(setting_engine)
             .build();
 
+        tracing::info!("🔧 [create_session] API built, creating peer connection...");
+
         // Create the peer connection
         let peer_connection = api
             .new_peer_connection(config)
             .await
             .map_err(|e| format!("Failed to create peer connection: {}", e))?;
 
+        tracing::info!("🔧 [create_session] peer connection created successfully");
         let peer_connection = Arc::new(peer_connection);
 
         // Set up ICE candidate handler
@@ -227,18 +263,27 @@ impl WebRtcManager {
                         } else {
                             "unknown"
                         };
+
+                        // webrtc-rs hardcodes sdp_mid="" for gathered candidates but browsers
+                        // reject candidates where sdpMid doesn't match the SDP media section id.
+                        // The data channel is always media section "0", so we fix it here.
+                        let sdp_mid = match json.sdp_mid.as_deref() {
+                            Some("") | None => Some("0".to_string()),
+                            other => other.map(|s| s.to_string()),
+                        };
+
                         tracing::debug!(
                             "🧊 ICE candidate gathered for session {}: type={}, mid={:?}",
                             session_id,
                             candidate_type,
-                            json.sdp_mid
+                            sdp_mid
                         );
 
                         let _ = tx.send(SignalingMessage::SyncData {
                             payload: serde_json::to_value(&CocoonMessage::WebrtcIceCandidate {
                                 session_id,
                                 candidate: json.candidate,
-                                sdp_mid: json.sdp_mid,
+                                sdp_mid,
                                 sdp_mline_index: json.sdp_mline_index.map(|i| i as i32),
                             }).unwrap(),
                         });
@@ -268,8 +313,8 @@ impl WebRtcManager {
         peer_connection.on_ice_connection_state_change(Box::new(move |state| {
             let session_id = session_id_clone.clone();
             Box::pin(async move {
-                tracing::info!(
-                    "🧊 ICE connection state for session {}: {:?}",
+                tracing::warn!(
+                    "🧊 [ICE-CONN] session={} state={:?}",
                     session_id,
                     state
                 );
@@ -286,11 +331,17 @@ impl WebRtcManager {
             let sessions = sessions_clone.clone();
 
             Box::pin(async move {
-                tracing::info!("WebRTC session {} state changed: {:?}", session_id, state);
+                tracing::warn!("🔌 [PC-STATE] session={} state={:?}", session_id, state);
 
                 match state {
+                    RTCPeerConnectionState::New => {
+                        tracing::info!("🔌 [PC-STATE] session={} → New", session_id);
+                    }
+                    RTCPeerConnectionState::Connecting => {
+                        tracing::info!("🔌 [PC-STATE] session={} → Connecting (DTLS handshake starting)", session_id);
+                    }
                     RTCPeerConnectionState::Connected => {
-                        tracing::info!("✅ WebRTC session {} connected successfully!", session_id);
+                        tracing::info!("✅ [PC-STATE] session={} → Connected! WebRTC fully established", session_id);
                         if let Some(session) = sessions.lock().await.get_mut(&session_id) {
                             session.state = "connected".to_string();
                         }
@@ -299,16 +350,22 @@ impl WebRtcManager {
                     | RTCPeerConnectionState::Failed
                     | RTCPeerConnectionState::Closed => {
                         let reason = match state {
-                            RTCPeerConnectionState::Disconnected => "disconnected",
+                            RTCPeerConnectionState::Disconnected => {
+                                tracing::warn!("⚠️ [PC-STATE] session={} → Disconnected (ICE lost connectivity, may recover)", session_id);
+                                "disconnected"
+                            }
                             RTCPeerConnectionState::Failed => {
-                                tracing::warn!(
-                                    "❌ WebRTC session {} failed - this often indicates ICE connectivity issues. \
+                                tracing::error!(
+                                    "❌ [PC-STATE] session={} → Failed! ICE connectivity could not be established. \
                                     Check WEBRTC_ICE_SERVERS config and ensure TURN server is available for NAT traversal.",
                                     session_id
                                 );
                                 "failed"
                             }
-                            RTCPeerConnectionState::Closed => "closed",
+                            RTCPeerConnectionState::Closed => {
+                                tracing::info!("🔌 [PC-STATE] session={} → Closed (normal shutdown)", session_id);
+                                "closed"
+                            }
                             _ => "unknown",
                         };
 
@@ -321,28 +378,37 @@ impl WebRtcManager {
 
                         sessions.lock().await.remove(&session_id);
                     }
-                    _ => {}
+                    _ => {
+                        tracing::info!("🔌 [PC-STATE] session={} → unhandled state {:?}", session_id, state);
+                    }
                 }
             })
         }));
+
+        // Per-session silk state (outlives individual data channel handler calls)
+        let silk_state = SilkDcState::new();
 
         // Set up data channel handler
         let session_id_clone = session_id.clone();
         let signaling_tx_clone = self.signaling_tx.clone();
         let sessions_clone = self.sessions.clone();
         let adi_router_clone = self.adi_router.clone();
+        let silk_state_clone = silk_state.clone();
         peer_connection.on_data_channel(Box::new(move |dc| {
             let session_id = session_id_clone.clone();
             let tx = signaling_tx_clone.clone();
             let sessions = sessions_clone.clone();
             let dc_label = dc.label().to_string();
             let adi_router = adi_router_clone.clone();
+            let silk_state = silk_state_clone.clone();
 
             Box::pin(async move {
-                tracing::info!(
-                    "WebRTC session {} data channel opened: {}",
+                tracing::warn!(
+                    "📡 [DATA-CHANNEL] on_data_channel FIRED! session={} label={} id={} readyState={:?}",
                     session_id,
-                    dc_label
+                    dc_label,
+                    dc.id(),
+                    dc.ready_state(),
                 );
 
                 // Store the data channel
@@ -356,19 +422,43 @@ impl WebRtcManager {
                 let tx_clone = tx.clone();
                 let dc_clone = dc.clone();
                 let adi_router_for_msg = adi_router.clone();
+                let silk_state_for_msg = silk_state.clone();
                 dc.on_message(Box::new(move |msg: DataChannelMessage| {
                     let session_id = session_id_clone.clone();
                     let channel = dc_label_clone.clone();
                     let tx = tx_clone.clone();
                     let dc_for_response = dc_clone.clone();
                     let adi_router = adi_router_for_msg.clone();
+                    let silk_state = silk_state_for_msg.clone();
 
                     Box::pin(async move {
+                        tracing::warn!(
+                            "📨 [DC-MSG] on_message FIRED! session={} channel={} len={} is_string={}",
+                            session_id, channel, msg.data.len(), msg.is_string
+                        );
+
                         let (data, binary) = if msg.is_string {
                             (String::from_utf8_lossy(&msg.data).to_string(), false)
                         } else {
                             (base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &msg.data), true)
                         };
+
+                        // Handle "silk" channel for terminal sessions
+                        if channel == "silk" {
+                            tracing::info!("🧵 [DC-MSG] Silk message received: {} bytes, preview={}", data.len(), &data[..data.len().min(200)]);
+                            match serde_json::from_str::<CocoonMessage>(&data) {
+                                Ok(cocoon_msg) => {
+                                    let dc = dc_for_response.clone();
+                                    tokio::spawn(async move {
+                                        handle_silk_dc_msg(cocoon_msg, silk_state, dc).await;
+                                    });
+                                }
+                                Err(e) => {
+                                    tracing::warn!("⚠️ Invalid silk message: {}", e);
+                                }
+                            }
+                            return;
+                        }
 
                         // Handle "file" channel for filesystem operations
                         if channel == "file" {
@@ -527,7 +617,8 @@ impl WebRtcManager {
             })
         }));
 
-        // Store the session
+        // Store the session (silk_state is held alive by the on_data_channel closure)
+        drop(silk_state);
         let session = WebRtcSession {
             session_id: session_id.clone(),
             peer_connection,
@@ -535,42 +626,62 @@ impl WebRtcManager {
             state: "pending".to_string(),
         };
 
-        self.sessions.lock().await.insert(session_id, session);
+        self.sessions.lock().await.insert(session_id.clone(), session);
+        tracing::info!("🔧 [create_session] END session_id={} — stored and ready for offer", session_id);
 
         Ok(())
     }
 
     /// Handle an incoming SDP offer and create an answer
     pub async fn handle_offer(&self, session_id: &str, sdp: &str) -> Result<String, String> {
-        let sessions = self.sessions.lock().await;
-        let session = sessions
-            .get(session_id)
-            .ok_or_else(|| format!("Session {} not found", session_id))?;
+        tracing::info!("📥 [handle_offer] START session_id={} sdp_len={}", session_id, sdp.len());
+
+        // Clone the peer_connection Arc and drop the lock BEFORE async WebRTC ops.
+        // set_remote_description can trigger on_data_channel which also locks sessions — holding
+        // the lock across these calls would deadlock.
+        let pc = {
+            let sessions = self.sessions.lock().await;
+            tracing::info!("📥 [handle_offer] lock acquired, sessions_count={}", sessions.len());
+
+            let session = sessions
+                .get(session_id)
+                .ok_or_else(|| {
+                    let keys: Vec<_> = sessions.keys().collect();
+                    tracing::error!("📥 [handle_offer] session NOT FOUND! id={} available={:?}", session_id, keys);
+                    format!("Session {} not found", session_id)
+                })?;
+
+            tracing::info!("📥 [handle_offer] session found, state={}", session.state);
+            session.peer_connection.clone()
+            // lock dropped here
+        };
 
         // Parse the offer
         let offer = RTCSessionDescription::offer(sdp.to_string())
             .map_err(|e| format!("Failed to parse SDP offer: {}", e))?;
+        tracing::info!("📥 [handle_offer] SDP offer parsed successfully");
 
-        // Set remote description
-        session
-            .peer_connection
-            .set_remote_description(offer)
+        // Set remote description (may trigger on_data_channel — lock must NOT be held)
+        tracing::info!("📥 [handle_offer] setting remote description...");
+        pc.set_remote_description(offer)
             .await
             .map_err(|e| format!("Failed to set remote description: {}", e))?;
+        tracing::info!("📥 [handle_offer] remote description set OK");
 
         // Create answer
-        let answer = session
-            .peer_connection
+        tracing::info!("📥 [handle_offer] creating answer...");
+        let answer = pc
             .create_answer(None)
             .await
             .map_err(|e| format!("Failed to create answer: {}", e))?;
+        tracing::info!("📥 [handle_offer] answer created, sdp_len={}", answer.sdp.len());
 
         // Set local description
-        session
-            .peer_connection
-            .set_local_description(answer.clone())
+        tracing::info!("📥 [handle_offer] setting local description...");
+        pc.set_local_description(answer.clone())
             .await
             .map_err(|e| format!("Failed to set local description: {}", e))?;
+        tracing::info!("📥 [handle_offer] local description set OK — answer ready to send");
 
         Ok(answer.sdp)
     }
@@ -596,16 +707,23 @@ impl WebRtcManager {
             "unknown"
         };
         tracing::debug!(
-            "🧊 Remote ICE candidate received for session {}: type={}, mid={:?}",
+            "🧊 Remote ICE candidate received for session {}: type={}, mid={:?}, candidate={}",
             session_id,
             candidate_type,
-            sdp_mid
+            sdp_mid,
+            candidate
         );
 
-        let sessions = self.sessions.lock().await;
-        let session = sessions
-            .get(session_id)
-            .ok_or_else(|| format!("Session {} not found", session_id))?;
+        let pc = {
+            let sessions = self.sessions.lock().await;
+            let session = sessions
+                .get(session_id)
+                .ok_or_else(|| {
+                    tracing::error!("🧊 [add_ice] session NOT FOUND: {}", session_id);
+                    format!("Session {} not found", session_id)
+                })?;
+            session.peer_connection.clone()
+        };
 
         let ice_candidate = webrtc::ice_transport::ice_candidate::RTCIceCandidateInit {
             candidate: candidate.to_string(),
@@ -614,11 +732,14 @@ impl WebRtcManager {
             ..Default::default()
         };
 
-        session
-            .peer_connection
-            .add_ice_candidate(ice_candidate)
+        tracing::info!("🧊 [add_ice] adding candidate to PC for session={}", session_id);
+        pc.add_ice_candidate(ice_candidate)
             .await
-            .map_err(|e| format!("Failed to add ICE candidate: {}", e))?;
+            .map_err(|e| {
+                tracing::error!("🧊 [add_ice] FAILED for session={}: {}", session_id, e);
+                format!("Failed to add ICE candidate: {}", e)
+            })?;
+        tracing::info!("🧊 [add_ice] candidate added OK for session={}", session_id);
 
         Ok(())
     }
@@ -717,6 +838,298 @@ impl WebRtcManager {
             .await
             .get(session_id)
             .map(|s| s.state.clone())
+    }
+}
+
+/// Send a CocoonMessage back through a silk data channel
+async fn dc_send(dc: &RTCDataChannel, msg: &CocoonMessage) {
+    match serde_json::to_string(msg) {
+        Ok(json) => {
+            tracing::warn!("📤 [dc_send] sending {} bytes, dc_id={}, readyState={:?}, preview={}", json.len(), dc.id(), dc.ready_state(), &json[..json.len().min(200)]);
+            match dc.send(&json.into_bytes().into()).await {
+                Ok(n) => {
+                    tracing::warn!("📤 [dc_send] OK — sent {} bytes", n);
+                }
+                Err(e) => {
+                    tracing::error!("📤 [dc_send] FAILED: {}", e);
+                }
+            }
+        }
+        Err(e) => {
+            tracing::error!("📤 [dc_send] serialization FAILED: {}", e);
+        }
+    }
+}
+
+/// Handle a message received on the "silk" WebRTC data channel
+async fn handle_silk_dc_msg(
+    msg: CocoonMessage,
+    state: Arc<SilkDcState>,
+    dc: Arc<RTCDataChannel>,
+) {
+    match msg {
+        CocoonMessage::SilkCreateSession { cwd, env, shell } => {
+            tracing::warn!("🧵 [SILK] Creating session cwd={:?} shell={:?}", cwd, shell);
+            let env = env.unwrap_or_default();
+            tracing::warn!("🧵 [SILK] Calling SilkSession::new...");
+            match SilkSession::new(cwd, env, shell) {
+                Ok(session) => {
+                    tracing::warn!("🧵 [SILK] Session OK id={} cwd={} shell={}", session.id, session.cwd, session.shell);
+                    let response = CocoonMessage::SilkCreateSessionResponse {
+                        session_id: session.id.to_string(),
+                        cwd: session.cwd.clone(),
+                        shell: session.shell.clone(),
+                    };
+                    tracing::warn!("🧵 [SILK] Acquiring silk_sessions lock...");
+                    state.silk_sessions.lock().await.insert(session.id.to_string(), session);
+                    tracing::warn!("🧵 [SILK] Session stored, calling dc_send...");
+                    dc_send(&dc, &response).await;
+                    tracing::warn!("🧵 [SILK] dc_send COMPLETE — response sent!");
+                }
+                Err(e) => {
+                    tracing::error!("🧵 [SILK] SilkSession::new FAILED: {}", e);
+                    dc_send(&dc, &CocoonMessage::SilkError {
+                        session_id: None,
+                        command_id: None,
+                        code: "session_create_failed".to_string(),
+                        message: e,
+                    }).await;
+                    tracing::warn!("🧵 [SILK] Error response sent");
+                }
+            }
+        }
+
+        CocoonMessage::SilkExecute { session_id, command, command_id, cols, rows, .. } => {
+            tracing::info!("🧵 [DC] Silk execute: {} (session {})", command, session_id);
+            let mut sessions = state.silk_sessions.lock().await;
+            let Some(session) = sessions.get_mut(&session_id) else {
+                drop(sessions);
+                dc_send(&dc, &CocoonMessage::SilkError {
+                    session_id: Some(session_id),
+                    command_id: Some(command_id),
+                    code: "session_not_found".to_string(),
+                    message: "Silk session not found".to_string(),
+                }).await;
+                return;
+            };
+
+            match session.execute(&command, command_id.clone()) {
+                Ok((interactive, child_opt)) => {
+                    if interactive {
+                        drop(sessions);
+                        let dc_for_pty = dc.clone();
+                        let state_for_pty = state.clone();
+                        let term_cols = cols.map(|c| c as u16).unwrap_or(80);
+                        let term_rows = rows.map(|r| r as u16).unwrap_or(24);
+                        let pty_id = Uuid::new_v4();
+
+                        let pty_system = portable_pty::native_pty_system();
+                        match pty_system.openpty(PtySize { rows: term_rows, cols: term_cols, pixel_width: 0, pixel_height: 0 }) {
+                            Ok(pair) => {
+                                let mut cmd = portable_pty::CommandBuilder::new("/bin/sh");
+                                cmd.arg("-c");
+                                cmd.arg(&command);
+                                cmd.env("TERM", "xterm-256color");
+
+                                match pair.slave.spawn_command(cmd) {
+                                    Ok(child) => {
+                                        // Update silk session with pty id
+                                        if let Some(s) = state_for_pty.silk_sessions.lock().await.get_mut(&session_id) {
+                                            s.set_pty_session(command_id.clone(), pty_id);
+                                        }
+
+                                        // Spawn pty output reader
+                                        let mut reader = pair.master.try_clone_reader().unwrap();
+                                        let session_id_for_pty = session_id.clone();
+                                        let command_id_for_pty = command_id.clone();
+                                        let pty_id_str = pty_id.to_string();
+                                        tokio::task::spawn_blocking(move || {
+                                            let mut buf = [0u8; 4096];
+                                            loop {
+                                                match reader.read(&mut buf) {
+                                                    Ok(0) => break,
+                                                    Ok(n) => {
+                                                        let data = String::from_utf8_lossy(&buf[..n]).to_string();
+                                                        let response = CocoonMessage::SilkPtyOutput {
+                                                            session_id: session_id_for_pty.clone(),
+                                                            command_id: command_id_for_pty.clone(),
+                                                            pty_session_id: pty_id_str.clone(),
+                                                            data,
+                                                        };
+                                                        let dc_clone = dc_for_pty.clone();
+                                                        tokio::spawn(async move {
+                                                            dc_send(&dc_clone, &response).await;
+                                                        });
+                                                    }
+                                                    Err(_) => break,
+                                                }
+                                            }
+                                        });
+
+                                        let pty_writer = pair.master.take_writer().unwrap();
+                                        let pty_session = SilkPtySession {
+                                            id: pty_id,
+                                            pair,
+                                            child,
+                                            writer: pty_writer,
+                                        };
+                                        state_for_pty.pty_sessions.lock().await.insert(command_id.clone(), pty_session);
+
+                                        dc_send(&dc, &CocoonMessage::SilkInteractiveRequired {
+                                            session_id,
+                                            command_id,
+                                            reason: format!("Command '{}' requires interactive mode", command.split_whitespace().next().unwrap_or(&command)),
+                                            pty_session_id: pty_id.to_string(),
+                                        }).await;
+                                    }
+                                    Err(e) => {
+                                        dc_send(&dc, &CocoonMessage::SilkError {
+                                            session_id: Some(session_id),
+                                            command_id: Some(command_id),
+                                            code: "pty_spawn_failed".to_string(),
+                                            message: e.to_string(),
+                                        }).await;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                dc_send(&dc, &CocoonMessage::SilkError {
+                                    session_id: Some(session_id),
+                                    command_id: Some(command_id),
+                                    code: "pty_create_failed".to_string(),
+                                    message: e.to_string(),
+                                }).await;
+                            }
+                        }
+                    } else if let Some(mut child) = child_opt {
+                        drop(sessions);
+                        let dc_for_out = dc.clone();
+                        let state_for_out = state.clone();
+                        let command_id_clone = command_id.clone();
+
+                        dc_send(&dc, &CocoonMessage::SilkCommandStarted {
+                            session_id: session_id.clone(),
+                            command_id: command_id.clone(),
+                            interactive: false,
+                        }).await;
+
+                        tokio::spawn(async move {
+                            let command_id = command_id_clone;
+                            let mut stdout = std::io::BufReader::new(child.stdout.take().expect("stdout piped"));
+                            let mut stderr = std::io::BufReader::new(child.stderr.take().expect("stderr piped"));
+                            let mut buf = [0u8; 4096];
+
+                            loop {
+                                match stdout.get_mut().read(&mut buf) {
+                                    Ok(0) => break,
+                                    Ok(n) => {
+                                        let data = String::from_utf8_lossy(&buf[..n]).to_string();
+                                        let html = AnsiToHtml::convert(&data);
+                                        dc_send(&dc_for_out, &CocoonMessage::SilkOutput {
+                                            session_id: session_id.clone(),
+                                            command_id: command_id.clone(),
+                                            stream: SilkStream::Stdout,
+                                            data,
+                                            html: Some(html),
+                                        }).await;
+                                    }
+                                    Err(_) => break,
+                                }
+                            }
+
+                            let mut stderr_buf = Vec::new();
+                            let _ = stderr.read_to_end(&mut stderr_buf);
+                            if !stderr_buf.is_empty() {
+                                let data = String::from_utf8_lossy(&stderr_buf).to_string();
+                                let html = AnsiToHtml::convert(&data);
+                                dc_send(&dc_for_out, &CocoonMessage::SilkOutput {
+                                    session_id: session_id.clone(),
+                                    command_id: command_id.clone(),
+                                    stream: SilkStream::Stderr,
+                                    data,
+                                    html: Some(html),
+                                }).await;
+                            }
+
+                            let exit_code = child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+
+                            let mut sessions = state_for_out.silk_sessions.lock().await;
+                            let cwd = if let Some(s) = sessions.get_mut(&session_id) {
+                                s.update_cwd_if_cd(&command);
+                                s.complete_command(command_id.clone());
+                                s.cwd.clone()
+                            } else {
+                                String::new()
+                            };
+                            drop(sessions);
+
+                            dc_send(&dc_for_out, &CocoonMessage::SilkCommandCompleted {
+                                session_id,
+                                command_id,
+                                exit_code,
+                                cwd,
+                            }).await;
+                        });
+                    } else {
+                        dc_send(&dc, &CocoonMessage::SilkError {
+                            session_id: Some(session_id),
+                            command_id: Some(command_id),
+                            code: "execute_failed".to_string(),
+                            message: "No child process".to_string(),
+                        }).await;
+                    }
+                }
+                Err(e) => {
+                    dc_send(&dc, &CocoonMessage::SilkError {
+                        session_id: Some(session_id),
+                        command_id: Some(command_id),
+                        code: "execute_failed".to_string(),
+                        message: e,
+                    }).await;
+                }
+            }
+        }
+
+        CocoonMessage::SilkInput { session_id, command_id, data } => {
+            // Forward input to PTY writer keyed by command_id
+            let mut pty_sessions = state.pty_sessions.lock().await;
+            if let Some(pty) = pty_sessions.get_mut(&command_id) {
+                if let Err(e) = std::io::Write::write_all(&mut pty.writer, data.as_bytes()) {
+                    tracing::warn!("⚠️ PTY write failed for {}: {}", command_id, e);
+                } else {
+                    let _ = std::io::Write::flush(&mut pty.writer);
+                }
+            } else {
+                dc_send(&dc, &CocoonMessage::SilkError {
+                    session_id: Some(session_id),
+                    command_id: Some(command_id),
+                    code: "command_not_found".to_string(),
+                    message: "Interactive command not found".to_string(),
+                }).await;
+            }
+        }
+
+        CocoonMessage::SilkResize { session_id: _, command_id, cols, rows } => {
+            let pty_sessions = state.pty_sessions.lock().await;
+            if let Some(pty) = pty_sessions.get(&command_id) {
+                let _ = pty.pair.master.resize(PtySize {
+                    rows: rows as u16,
+                    cols: cols as u16,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                });
+            }
+        }
+
+        CocoonMessage::SilkCloseSession { session_id } => {
+            tracing::info!("🧵 [DC] Closing silk session {}", session_id);
+            state.silk_sessions.lock().await.remove(&session_id);
+            dc_send(&dc, &CocoonMessage::SilkSessionClosed { session_id }).await;
+        }
+
+        _ => {
+            tracing::debug!("🧵 [DC] Unhandled silk message type");
+        }
     }
 }
 

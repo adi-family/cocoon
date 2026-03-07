@@ -53,12 +53,12 @@ pub struct SilkSession {
     pub cwd: String,
     pub env: HashMap<String, String>,
     /// Running commands that may need input
-    pub running_commands: HashMap<Uuid, RunningCommand>,
+    pub running_commands: HashMap<String, RunningCommand>,
 }
 
 /// A command running within a Silk session
 pub struct RunningCommand {
-    pub id: Uuid,
+    pub id: String,
     pub command: String,
     pub interactive: bool,
     /// For non-interactive: child process
@@ -88,6 +88,9 @@ impl SilkSession {
         if !std::path::Path::new(&shell).exists() {
             return Err(format!("Shell not found: {}", shell));
         }
+
+        let mut env = env;
+        env.insert("SILK_MODE".to_string(), "true".to_string());
 
         Ok(Self {
             id: Uuid::new_v4(),
@@ -121,14 +124,14 @@ impl SilkSession {
     pub fn execute(
         &mut self,
         command: &str,
-        command_id: Uuid,
+        command_id: String,
     ) -> Result<(bool, Option<Child>), String> {
         let interactive = Self::is_interactive_command(command);
 
         if interactive {
             // Mark as needing PTY, actual PTY creation happens in core.rs
             self.running_commands.insert(
-                command_id,
+                command_id.clone(),
                 RunningCommand {
                     id: command_id,
                     command: command.to_string(),
@@ -165,7 +168,7 @@ impl SilkSession {
             .map_err(|e| format!("Failed to spawn command: {}", e))?;
 
         self.running_commands.insert(
-            command_id,
+            command_id.clone(),
             RunningCommand {
                 id: command_id,
                 command: command.to_string(),
@@ -204,14 +207,14 @@ impl SilkSession {
     }
 
     /// Set PTY session ID for interactive command
-    pub fn set_pty_session(&mut self, command_id: Uuid, pty_session_id: Uuid) {
+    pub fn set_pty_session(&mut self, command_id: String, pty_session_id: Uuid) {
         if let Some(cmd) = self.running_commands.get_mut(&command_id) {
             cmd.pty_session_id = Some(pty_session_id);
         }
     }
 
     /// Remove completed command
-    pub fn complete_command(&mut self, command_id: Uuid) {
+    pub fn complete_command(&mut self, command_id: String) {
         self.running_commands.remove(&command_id);
     }
 }
