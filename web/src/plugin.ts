@@ -2,11 +2,12 @@ import '@adi/auth-web-plugin';
 import '@adi/signaling-web-plugin';
 import { AdiPlugin } from '@adi-family/sdk-plugin';
 import { AdiDebugScreenBusKey } from '@adi/debug-screen-web-plugin/bus';
+import { AdiSignalingBusKey, type DeviceInfo } from '@adi/signaling-web-plugin/bus';
 import { AdiRouterBusKey } from '@adi/router-web-plugin/bus';
 import { CocoonClient } from './cocoon-client';
 import { PLUGIN_ID, PLUGIN_VERSION } from './config';
 import type { AdiCocoonDebugElement, CocoonDebugInfo } from './debug-section';
-import type { AdiCocoonListElement, CocoonListItem, SetupConnectEvent, AuthTokenProvider } from './component';
+import type { AdiCocoonListElement, CocoonListItem, SetupConnectEvent } from './component';
 import './bus';
 
 export interface CocoonApi {
@@ -23,6 +24,7 @@ export class CocoonPlugin extends AdiPlugin implements CocoonApi {
   private readonly clients = new Map<string, CocoonClient>();
   private debugEl: AdiCocoonDebugElement | null = null;
   private listEl: AdiCocoonListElement | null = null;
+  private lastDevices: DeviceInfo[] = [];
   private readonly unsubs: (() => void)[] = [];
 
   get api(): CocoonApi {
@@ -73,7 +75,7 @@ export class CocoonPlugin extends AdiPlugin implements CocoonApi {
       path: '',
       init: () => {
         this.listEl = document.createElement('adi-cocoon-list') as AdiCocoonListElement;
-        this.listEl.authTokenProvider = () => this.getAuthToken();
+        this.listEl.subtokenProvider = () => this.getSetupSubtoken();
         this.listEl.addEventListener('setup-connect', ((e: CustomEvent<SetupConnectEvent>) => {
           const url = e.detail.signalingUrl;
           const signalingApi = this.app.api('adi.signaling');
@@ -93,6 +95,7 @@ export class CocoonPlugin extends AdiPlugin implements CocoonApi {
         pluginId: PLUGIN_ID,
         init: () => {
           this.debugEl = document.createElement('adi-cocoon-debug') as AdiCocoonDebugElement;
+          this.debugEl.subtokenProvider = () => this.getSetupSubtoken();
           this.syncDebug();
           return this.debugEl;
         },
@@ -105,6 +108,10 @@ export class CocoonPlugin extends AdiPlugin implements CocoonApi {
       this.bus.on('cocoon:session-created', () => this.syncViews(), PLUGIN_ID),
       this.bus.on('cocoon:session-closed', () => this.syncViews(), PLUGIN_ID),
       this.bus.on('cocoon:error', () => this.syncViews(), PLUGIN_ID),
+      this.bus.on(AdiSignalingBusKey.Devices, ({ devices }) => {
+        this.lastDevices = devices;
+        this.debugEl?.updateDevices(devices);
+      }, PLUGIN_ID),
     );
   }
 
@@ -127,17 +134,40 @@ export class CocoonPlugin extends AdiPlugin implements CocoonApi {
       infos.push({ cocoonId, sessions: client.allSessions().size });
     }
     this.debugEl.cocoons = infos;
+    this.debugEl.updateDevices(this.lastDevices);
+    const signalingApi = this.app.api('adi.signaling');
+    this.debugEl.signalingUrls = [...signalingApi.allServers().keys()];
   }
 
-  private async getAuthToken(): Promise<string | null> {
+  private getAuthDomain(): string | null {
     const signalingApi = this.app.api('adi.signaling');
     const firstServer = signalingApi.allServers().values().next().value;
     if (!firstServer) return null;
 
+    const wsUrl = new URL(firstServer.url);
+    return `${wsUrl.protocol === 'wss:' ? 'https:' : 'http:'}//${wsUrl.host}/api/auth`;
+  }
+
+  private async getSetupSubtoken(): Promise<string | null> {
+    const authDomain = this.getAuthDomain();
+    if (!authDomain) return null;
+
     try {
-      const wsUrl = new URL(firstServer.url);
-      const authDomain = `${wsUrl.protocol === 'wss:' ? 'https:' : 'http:'}//${wsUrl.host}/api/auth`;
-      return await this.app.api('adi.auth').getToken(authDomain);
+      const token = await this.app.api('adi.auth').getToken(authDomain);
+      if (!token) return null;
+
+      const resp = await fetch(`${authDomain}/subtoken`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({ ttlSeconds: 600 }),
+      });
+      if (!resp.ok) return null;
+
+      const data = await resp.json();
+      return data.accessToken ?? data.access_token ?? null;
     } catch {
       return null;
     }

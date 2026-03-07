@@ -25,6 +25,7 @@ env_vars! {
     CocoonServices => "COCOON_SERVICES",
     CocoonSetupToken => "COCOON_SETUP_TOKEN",
     CocoonName => "COCOON_NAME",
+    CocoonProtocols => "COCOON_PROTOCOLS",
 }
 
 const OUTPUT_DIR: &str = "/cocoon/output";
@@ -1032,8 +1033,16 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         router.register(std::sync::Arc::new(tools_service));
         tracing::info!("📦 Registered ADI service: tools ({} tools)", tool_count);
         
-        Arc::new(Mutex::new(router))
+        router
     };
+
+    let adi_services: Vec<String> = adi_router
+        .list_services()
+        .iter()
+        .map(|s| format!("{}:{}", s.id, s.version))
+        .collect();
+
+    let adi_router = Arc::new(Mutex::new(adi_router));
 
     // WebRTC signaling channel for sending messages back through WebSocket
     let (webrtc_tx, mut webrtc_rx) = tokio::sync::mpsc::unbounded_channel::<SignalingMessage>();
@@ -1095,11 +1104,22 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(ref name) = cocoon_name {
         tags.insert("name".to_string(), name.clone());
     }
+    let protocols: Vec<String> = env_opt(EnvVar::CocoonProtocols.as_str())
+        .map(|s| s.split(',').map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).collect())
+        .unwrap_or_else(|| vec!["silk".to_string()]);
+
+    let device_config = Some(serde_json::json!({
+        "adi_services": adi_services,
+        "protocols": protocols,
+    }));
+
     let register_msg = SignalingMessage::DeviceRegister {
         secret,
         device_id: device_id.clone(),
         version: cocoon_version,
         tags: if tags.is_empty() { None } else { Some(tags) },
+        device_type: Some("cocoon".to_string()),
+        device_config,
     };
 
     // Track current device ID for deregistration

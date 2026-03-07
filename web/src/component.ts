@@ -29,12 +29,12 @@ interface SetupMachine {
 const SETUP_PORT = 14730;
 const SETUP_POLL_MS = 2000;
 
-export type AuthTokenProvider = () => Promise<string | null>;
+export type SubtokenProvider = () => Promise<string | null>;
 
 export class AdiCocoonListElement extends LitElement {
   @state() cocoons: CocoonListItem[] = [];
   @state() signalingUrls: string[] = [];
-  authTokenProvider: AuthTokenProvider | null = null;
+  subtokenProvider: SubtokenProvider | null = null;
   @state() private expanded: string | null = null;
 
   @state() private setupState: SetupState = 'idle';
@@ -114,14 +114,13 @@ export class AdiCocoonListElement extends LitElement {
     this.setupError = '';
 
     try {
-      const authToken = this.authTokenProvider ? await this.authTokenProvider() : null;
+      const setupToken = this.subtokenProvider ? await this.subtokenProvider() : null;
 
       const resp = await fetch(`http://localhost:${SETUP_PORT}/connect`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          token: '',
-          auth_token: authToken ?? '',
+          token: setupToken ?? '',
           signaling_url: this.setupUrl.trim(),
         }),
       });
