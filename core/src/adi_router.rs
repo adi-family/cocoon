@@ -82,6 +82,13 @@ pub struct AdiServiceError {
 }
 
 impl AdiServiceError {
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+
     pub fn not_found(message: impl Into<String>) -> Self {
         Self {
             code: "not_found".to_string(),
@@ -122,6 +129,28 @@ impl AdiServiceError {
             code: "subscription_failed".to_string(),
             message: message.into(),
         }
+    }
+}
+
+/// Caller identity resolved from the signaling session
+#[derive(Debug, Clone)]
+pub struct AdiCallerContext {
+    /// Owner user_id from signaling registration (from setup_token)
+    pub user_id: Option<String>,
+    /// Device ID of the cocoon
+    pub device_id: Option<String>,
+}
+
+impl AdiCallerContext {
+    pub fn anonymous() -> Self {
+        Self { user_id: None, device_id: None }
+    }
+
+    /// Get user_id or return an error
+    pub fn require_user_id(&self) -> Result<&str, AdiServiceError> {
+        self.user_id.as_deref().ok_or_else(|| {
+            AdiServiceError::new("unauthorized", "No authenticated user. Cocoon must be claimed via setup_token.")
+        })
     }
 }
 
@@ -169,6 +198,7 @@ pub trait AdiService: Send + Sync {
     /// Handle a request
     ///
     /// # Arguments
+    /// * `ctx` - Caller context (user identity from signaling)
     /// * `method` - Method name to invoke
     /// * `params` - JSON parameters for the method
     ///
@@ -178,6 +208,7 @@ pub trait AdiService: Send + Sync {
     /// * `Err(error)` - Error response
     async fn handle(
         &self,
+        ctx: &AdiCallerContext,
         method: &str,
         params: JsonValue,
     ) -> Result<AdiHandleResult, AdiServiceError>;
@@ -450,7 +481,7 @@ impl AdiRouter {
     /// Routes the request to the appropriate service and returns the response.
     /// For streaming responses, returns the first chunk and provides a channel
     /// for subsequent chunks.
-    pub async fn handle(&self, request: AdiRequest) -> AdiRouterResult {
+    pub async fn handle(&self, ctx: &AdiCallerContext, request: AdiRequest) -> AdiRouterResult {
         let service = match self.services.get(&request.service) {
             Some(s) => s,
             None => {
@@ -474,7 +505,7 @@ impl AdiRouter {
         }
 
         // Handle the request
-        match service.handle(&request.method, request.params).await {
+        match service.handle(ctx, &request.method, request.params).await {
             Ok(AdiHandleResult::Success(data)) => {
                 AdiRouterResult::Single(AdiResponse::Success {
                     request_id: request.request_id,
@@ -632,6 +663,7 @@ mod tests {
 
         async fn handle(
             &self,
+            _ctx: &AdiCallerContext,
             method: &str,
             params: JsonValue,
         ) -> Result<AdiHandleResult, AdiServiceError> {
@@ -683,7 +715,7 @@ mod tests {
             params: json!({"hello": "world"}),
         };
 
-        let result = router.handle(request).await;
+        let result = router.handle(&AdiCallerContext::anonymous(), request).await;
         match result {
             AdiRouterResult::Single(AdiResponse::Success { data, .. }) => {
                 assert_eq!(data["hello"], "world");
@@ -703,7 +735,7 @@ mod tests {
             params: json!({}),
         };
 
-        let result = router.handle(request).await;
+        let result = router.handle(&AdiCallerContext::anonymous(), request).await;
         match result {
             AdiRouterResult::Single(AdiResponse::ServiceNotFound { service, .. }) => {
                 assert_eq!(service, "nonexistent");
@@ -724,7 +756,7 @@ mod tests {
             params: json!({}),
         };
 
-        let result = router.handle(request).await;
+        let result = router.handle(&AdiCallerContext::anonymous(), request).await;
         match result {
             AdiRouterResult::Single(AdiResponse::MethodNotFound {
                 method,
@@ -750,7 +782,7 @@ mod tests {
             params: json!({"n": 3}),
         };
 
-        let result = router.handle(request).await;
+        let result = router.handle(&AdiCallerContext::anonymous(), request).await;
         match result {
             AdiRouterResult::Stream { mut receiver, .. } => {
                 let mut chunks = Vec::new();

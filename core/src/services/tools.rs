@@ -7,7 +7,7 @@
 //!
 //! Tools follow the MCP tool schema format with JSON Schema for parameters.
 
-use crate::adi_router::{AdiHandleResult, AdiService, AdiServiceError};
+use crate::adi_router::{AdiCallerContext, AdiHandleResult, AdiService, AdiServiceError};
 use async_trait::async_trait;
 use crate::protocol::types::AdiMethodInfo;
 use serde::{Deserialize, Serialize};
@@ -1091,6 +1091,7 @@ impl AdiService for ToolsService {
 
     async fn handle(
         &self,
+        _ctx: &AdiCallerContext,
         method: &str,
         params: JsonValue,
     ) -> Result<AdiHandleResult, AdiServiceError> {
@@ -1112,7 +1113,8 @@ mod tests {
     async fn test_tools_service_list() {
         let service = ToolsService::new();
 
-        let result = service.handle("list", json!({})).await.unwrap();
+        let ctx = AdiCallerContext::anonymous();
+        let result = service.handle(&ctx, "list", json!({})).await.unwrap();
         match result {
             AdiHandleResult::Success(data) => {
                 let tools = data.as_array().unwrap();
@@ -1133,8 +1135,10 @@ mod tests {
     async fn test_tools_service_call_shell() {
         let service = ToolsService::new();
 
+        let ctx = AdiCallerContext::anonymous();
         let result = service
             .handle(
+                &ctx,
                 "call",
                 json!({
                     "name": "shell_execute",
@@ -1165,8 +1169,9 @@ mod tests {
     async fn test_tools_service_get_schema() {
         let service = ToolsService::new();
 
+        let ctx = AdiCallerContext::anonymous();
         let result = service
-            .handle("get_schema", json!({"name": "shell_execute"}))
+            .handle(&ctx, "get_schema", json!({"name": "shell_execute"}))
             .await
             .unwrap();
 
@@ -1183,7 +1188,8 @@ mod tests {
     async fn test_tools_service_providers() {
         let service = ToolsService::new();
 
-        let result = service.handle("providers", json!({})).await.unwrap();
+        let ctx = AdiCallerContext::anonymous();
+        let result = service.handle(&ctx, "providers", json!({})).await.unwrap();
         match result {
             AdiHandleResult::Success(data) => {
                 let providers = data.as_array().unwrap();
@@ -1197,8 +1203,10 @@ mod tests {
     async fn test_tools_service_tool_not_found() {
         let service = ToolsService::new();
 
+        let ctx = AdiCallerContext::anonymous();
         let result = service
             .handle(
+                &ctx,
                 "call",
                 json!({
                     "name": "nonexistent_tool",

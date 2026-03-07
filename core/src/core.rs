@@ -875,10 +875,11 @@ async fn handle_cocoon_webrtc(
         CocoonMessage::WebrtcStartSession {
             session_id,
             device_id: client_id,
+            user_id,
             ..
         } => {
-            tracing::info!("🎥 WebRTC session request from {}: {}", client_id, session_id);
-            match webrtc.create_session(session_id.clone()).await {
+            tracing::info!("🎥 WebRTC session request from {}: {} (user_id={:?})", client_id, session_id, user_id);
+            match webrtc.create_session(session_id.clone(), user_id).await {
                 Ok(()) => {
                     tracing::info!("✅ WebRTC session {} created", session_id);
                 }
@@ -1037,6 +1038,20 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Err(e) => {
                     tracing::warn!("⚠️ Failed to initialize knowledgebase service: {}", e);
+                }
+            }
+        }
+
+        // Register credentials service if enabled
+        #[cfg(feature = "credentials-core")]
+        {
+            match crate::services::CredentialsService::from_env().await {
+                Ok(credentials_service) => {
+                    router.register(std::sync::Arc::new(credentials_service));
+                    tracing::info!("📦 Registered ADI service: credentials");
+                }
+                Err(e) => {
+                    tracing::warn!("⚠️ Failed to initialize credentials service: {}", e);
                 }
             }
         }

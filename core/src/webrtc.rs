@@ -16,7 +16,7 @@
 //!
 //! If no ICE servers are configured, defaults to Google's public STUN server.
 
-use crate::adi_router::{AdiDiscovery, AdiRequest, AdiResponse, AdiRouter, AdiRouterResult};
+use crate::adi_router::{AdiCallerContext, AdiDiscovery, AdiRequest, AdiResponse, AdiRouter, AdiRouterResult};
 use crate::filesystem::{FileSystemRequest, handle_request as handle_fs_request};
 use crate::protocol::messages::CocoonMessage;
 use crate::protocol::types::SilkStream;
@@ -150,6 +150,8 @@ pub struct WebRtcSession {
     pub peer_connection: Arc<RTCPeerConnection>,
     pub data_channels: HashMap<String, Arc<RTCDataChannel>>,
     pub state: String,
+    /// Authenticated user_id of the peer who initiated this connection
+    pub user_id: Option<String>,
 }
 
 /// WebRTC session manager
@@ -201,7 +203,7 @@ impl WebRtcManager {
     }
 
     /// Create a new WebRTC peer connection for a session
-    pub async fn create_session(&self, session_id: String) -> Result<(), String> {
+    pub async fn create_session(&self, session_id: String, user_id: Option<String>) -> Result<(), String> {
         tracing::info!("🔧 [create_session] START session_id={}", session_id);
         tracing::info!("🔧 [create_session] current session count: {}", self.sessions.lock().await.len());
 
@@ -393,6 +395,7 @@ impl WebRtcManager {
         let signaling_tx_clone = self.signaling_tx.clone();
         let sessions_clone = self.sessions.clone();
         let adi_router_clone = self.adi_router.clone();
+        let user_id_clone = user_id.clone();
         let silk_state_clone = silk_state.clone();
         peer_connection.on_data_channel(Box::new(move |dc| {
             let session_id = session_id_clone.clone();
@@ -400,6 +403,7 @@ impl WebRtcManager {
             let sessions = sessions_clone.clone();
             let dc_label = dc.label().to_string();
             let adi_router = adi_router_clone.clone();
+            let user_id = user_id_clone.clone();
             let silk_state = silk_state_clone.clone();
 
             Box::pin(async move {
@@ -422,6 +426,7 @@ impl WebRtcManager {
                 let tx_clone = tx.clone();
                 let dc_clone = dc.clone();
                 let adi_router_for_msg = adi_router.clone();
+                let user_id_for_msg = user_id.clone();
                 let silk_state_for_msg = silk_state.clone();
                 dc.on_message(Box::new(move |msg: DataChannelMessage| {
                     let session_id = session_id_clone.clone();
@@ -429,6 +434,7 @@ impl WebRtcManager {
                     let tx = tx_clone.clone();
                     let dc_for_response = dc_clone.clone();
                     let adi_router = adi_router_for_msg.clone();
+                    let user_id = user_id_for_msg.clone();
                     let silk_state = silk_state_for_msg.clone();
 
                     Box::pin(async move {
@@ -507,13 +513,19 @@ impl WebRtcManager {
                         if channel == "adi" {
                             if let Some(router) = &adi_router {
                                 tracing::debug!("📦 ADI request received: {} bytes", data.len());
-                                
+
+                                // Build caller context from per-connection user_id
+                                let ctx = AdiCallerContext {
+                                    user_id: user_id.clone(),
+                                    device_id: None,
+                                };
+
                                 // Try to parse as discovery request first
                                 if let Ok(discovery) = serde_json::from_str::<AdiDiscovery>(&data) {
                                     let router_guard = router.lock().await;
                                     let response = router_guard.handle_discovery(discovery);
                                     drop(router_guard);
-                                    
+
                                     if let Ok(response_json) = serde_json::to_string(&response) {
                                         if let Err(e) = dc_for_response.send(&response_json.into_bytes().into()).await {
                                             tracing::error!("❌ Failed to send ADI discovery response: {}", e);
@@ -521,12 +533,12 @@ impl WebRtcManager {
                                     }
                                     return;
                                 }
-                                
+
                                 // Parse as service request
                                 match serde_json::from_str::<AdiRequest>(&data) {
                                     Ok(request) => {
                                         let router_guard = router.lock().await;
-                                        let result = router_guard.handle(request).await;
+                                        let result = router_guard.handle(&ctx, request).await;
                                         drop(router_guard);
                                         
                                         match result {
@@ -624,6 +636,7 @@ impl WebRtcManager {
             peer_connection,
             data_channels: HashMap::new(),
             state: "pending".to_string(),
+            user_id,
         };
 
         self.sessions.lock().await.insert(session_id.clone(), session);
@@ -1153,7 +1166,7 @@ mod tests {
     async fn test_create_single_session() {
         let (manager, _rx) = create_test_manager();
 
-        let result = manager.create_session("session-1".to_string()).await;
+        let result = manager.create_session("session-1".to_string(), None).await;
         assert!(result.is_ok(), "Failed to create session: {:?}", result);
 
         assert!(manager.session_exists("session-1").await);
@@ -1167,7 +1180,7 @@ mod tests {
         // Create 5 sessions sequentially
         for i in 1..=5 {
             let session_id = format!("session-{}", i);
-            let result = manager.create_session(session_id.clone()).await;
+            let result = manager.create_session(session_id.clone(), None).await;
             assert!(
                 result.is_ok(),
                 "Failed to create session {}: {:?}",
@@ -1201,7 +1214,7 @@ mod tests {
             let manager_clone = manager.clone();
             let handle = tokio::spawn(async move {
                 let session_id = format!("concurrent-session-{}", i);
-                manager_clone.create_session(session_id).await
+                manager_clone.create_session(session_id, None).await
             });
             handles.push(handle);
         }
@@ -1229,7 +1242,7 @@ mod tests {
 
         // Create a session
         manager
-            .create_session("session-to-close".to_string())
+            .create_session("session-to-close".to_string(), None)
             .await
             .expect("Failed to create session");
         assert!(manager.session_exists("session-to-close").await);
@@ -1251,7 +1264,7 @@ mod tests {
 
         // Create initial session
         manager
-            .create_session("recyclable-session".to_string())
+            .create_session("recyclable-session".to_string(), None)
             .await
             .expect("Failed to create initial session");
         assert!(manager.session_exists("recyclable-session").await);
@@ -1265,7 +1278,7 @@ mod tests {
 
         // Recreate with same ID - THIS IS THE KEY TEST FOR THE BUG
         let result = manager
-            .create_session("recyclable-session".to_string())
+            .create_session("recyclable-session".to_string(), None)
             .await;
         assert!(
             result.is_ok(),
@@ -1282,7 +1295,7 @@ mod tests {
         // Run 5 create-close cycles on the same session ID
         for cycle in 1..=5 {
             let result = manager
-                .create_session("lifecycle-test".to_string())
+                .create_session("lifecycle-test".to_string(), None)
                 .await;
             assert!(
                 result.is_ok(),
@@ -1323,15 +1336,15 @@ mod tests {
 
         // Create 3 sessions
         manager
-            .create_session("session-a".to_string())
+            .create_session("session-a".to_string(), None)
             .await
             .expect("Failed to create session-a");
         manager
-            .create_session("session-b".to_string())
+            .create_session("session-b".to_string(), None)
             .await
             .expect("Failed to create session-b");
         manager
-            .create_session("session-c".to_string())
+            .create_session("session-c".to_string(), None)
             .await
             .expect("Failed to create session-c");
 
@@ -1351,7 +1364,7 @@ mod tests {
 
         // Recreate session-b
         manager
-            .create_session("session-b".to_string())
+            .create_session("session-b".to_string(), None)
             .await
             .expect("Failed to recreate session-b");
 
@@ -1364,7 +1377,7 @@ mod tests {
         let (manager, _rx) = create_test_manager();
 
         manager
-            .create_session("state-test".to_string())
+            .create_session("state-test".to_string(), None)
             .await
             .expect("Failed to create session");
 
@@ -1387,7 +1400,7 @@ mod tests {
 
         // Simulate rapid page refresh scenario - 20 rapid cycles
         for i in 1..=20 {
-            let result = manager.create_session(format!("rapid-{}", i)).await;
+            let result = manager.create_session(format!("rapid-{}", i), None).await;
             assert!(
                 result.is_ok(),
                 "Rapid cycle {}: create failed: {:?}",
@@ -1414,7 +1427,7 @@ mod tests {
         // Create 10 sessions
         for i in 1..=10 {
             manager
-                .create_session(format!("cc-session-{}", i))
+                .create_session(format!("cc-session-{}", i), None)
                 .await
                 .expect("Failed to create session");
         }
@@ -1438,7 +1451,7 @@ mod tests {
             let manager_clone = manager.clone();
             let handle = tokio::spawn(async move {
                 manager_clone
-                    .create_session(format!("cc-session-{}", i))
+                    .create_session(format!("cc-session-{}", i), None)
                     .await
             });
             handles.push(handle);
@@ -1463,12 +1476,12 @@ mod tests {
 
         // Create session
         manager
-            .create_session("duplicate-test".to_string())
+            .create_session("duplicate-test".to_string(), None)
             .await
             .expect("Failed to create first session");
 
         // Create again with same ID (should overwrite)
-        let result = manager.create_session("duplicate-test".to_string()).await;
+        let result = manager.create_session("duplicate-test".to_string(), None).await;
         assert!(result.is_ok(), "Second create should succeed");
 
         // Should still be just 1 session
@@ -1517,7 +1530,7 @@ mod tests {
             let manager_clone = manager.clone();
             let handle = tokio::spawn(async move {
                 manager_clone
-                    .create_session(format!("stress-{}", i))
+                    .create_session(format!("stress-{}", i), None)
                     .await
             });
             handles.push(handle);

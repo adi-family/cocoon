@@ -40,7 +40,7 @@ export type SignalingMessage =
   | { type: 'adi_subscription_error'; request_id: string; code: string; message: string }
 
   // ── webrtc ──
-  | { type: 'webrtc_start_session'; session_id: string; device_id: string; data_channels?: string[] }
+  | { type: 'webrtc_start_session'; session_id: string; device_id: string; user_id?: string; data_channels?: string[] }
   | { type: 'webrtc_offer'; session_id: string; sdp: string }
   | { type: 'webrtc_answer'; session_id: string; sdp: string }
   | { type: 'webrtc_ice_candidate'; session_id: string; candidate: string; sdp_mid?: string; sdp_mline_index?: number }

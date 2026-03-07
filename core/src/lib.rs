@@ -2,6 +2,11 @@ pub mod protocol {
     include!(concat!(env!("OUT_DIR"), "/generated_protocol.rs"));
 }
 
+#[cfg(feature = "credentials-service")]
+pub mod credentials_generated {
+    include!(concat!(env!("OUT_DIR"), "/generated_credentials.rs"));
+}
+
 impl Default for protocol::types::AdiMethodInfo {
     fn default() -> Self {
         Self {

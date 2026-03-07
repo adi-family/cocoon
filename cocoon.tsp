@@ -166,7 +166,7 @@ interface Adi {
 @channel("webrtc")
 interface WebRtc {
     @event
-    startSession(session_id: string, device_id: string, data_channels?: string[]): void;
+    startSession(session_id: string, device_id: string, user_id?: string, data_channels?: string[]): void;
 
     @event
     offer(session_id: string, sdp: string): void;

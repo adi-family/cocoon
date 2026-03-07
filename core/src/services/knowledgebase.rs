@@ -4,7 +4,7 @@
 //! via the ADI service protocol.
 
 use crate::adi_router::{
-    AdiHandleResult, AdiService, AdiServiceError, SubscriptionEvent, SubscriptionEventInfo,
+    AdiCallerContext, AdiHandleResult, AdiService, AdiServiceError, SubscriptionEvent, SubscriptionEventInfo,
 };
 use async_trait::async_trait;
 use kb_core::{EdgeType, Knowledgebase, NodeType};
@@ -537,6 +537,7 @@ impl AdiService for KnowledgebaseService {
 
     async fn handle(
         &self,
+        _ctx: &AdiCallerContext,
         method: &str,
         params: JsonValue,
     ) -> Result<AdiHandleResult, AdiServiceError> {

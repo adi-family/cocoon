@@ -11,11 +11,17 @@ pub mod knowledgebase;
 
 pub mod tools;
 
+#[cfg(feature = "credentials-core")]
+pub mod credentials;
+
 #[cfg(feature = "tasks-core")]
 pub use tasks::TasksService;
 
 #[cfg(feature = "kb-core")]
 pub use knowledgebase::KnowledgebaseService;
+
+#[cfg(feature = "credentials-core")]
+pub use credentials::CredentialsService;
 
 pub use tools::{
     FileSystemToolProvider, McpServerProvider, ShellToolProvider, ToolCategory, ToolContentType,

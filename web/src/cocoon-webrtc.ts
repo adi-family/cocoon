@@ -27,6 +27,7 @@ export class CocoonWebRTC {
     private readonly server: SyncDataSender,
     private readonly bus: EventBus,
     private readonly rtcConfig?: WebRTCConfig,
+    private readonly userId?: string,
   ) {}
 
   get connected(): boolean {
@@ -167,6 +168,7 @@ export class CocoonWebRTC {
         type: 'webrtc_start_session',
         session_id: this.sessionId,
         device_id: this.cocoonId,
+        user_id: this.userId,
         data_channels: ['silk'],
       },
     });

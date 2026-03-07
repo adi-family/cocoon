@@ -26,11 +26,11 @@ export class CocoonClient {
   private readonly sessions = new Map<string, SilkSession>();
   private readonly unsubs: (() => void)[] = [];
 
-  constructor(cocoonId: string, server: SyncDataSender, bus: EventBus, rtcConfig?: WebRTCConfig) {
+  constructor(cocoonId: string, server: SyncDataSender, bus: EventBus, rtcConfig?: WebRTCConfig, userId?: string) {
     this.cocoonId = cocoonId;
     this.bus = bus;
     this.server = server;
-    this.webrtc = new CocoonWebRTC(cocoonId, server, bus, rtcConfig);
+    this.webrtc = new CocoonWebRTC(cocoonId, server, bus, rtcConfig, userId);
 
     // Route silk responses from WebRTC data channel to session handlers
     this.unsubs.push(

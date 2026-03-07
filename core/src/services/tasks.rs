@@ -11,7 +11,7 @@
 //! - Notifications for task lifecycle events
 
 use crate::adi_router::{
-    AdiHandleResult, AdiService, AdiServiceError, SubscriptionEvent, SubscriptionEventInfo,
+    AdiCallerContext, AdiHandleResult, AdiService, AdiServiceError, SubscriptionEvent, SubscriptionEventInfo,
 };
 use tasks_core::{CreateTask, Task, TaskId, TaskManager, TaskStatus};
 use async_trait::async_trait;
@@ -716,6 +716,7 @@ impl AdiService for TasksService {
 
     async fn handle(
         &self,
+        _ctx: &AdiCallerContext,
         method: &str,
         params: JsonValue,
     ) -> Result<AdiHandleResult, AdiServiceError> {
@@ -749,7 +750,7 @@ mod tests {
 
         // Create a task
         let result = service
-            .handle("create", json!({"title": "Test task", "description": "A test"}))
+            .handle(&AdiCallerContext::anonymous(), "create", json!({"title": "Test task", "description": "A test"}))
             .await
             .unwrap();
 
@@ -761,7 +762,7 @@ mod tests {
         }
 
         // List tasks
-        let result = service.handle("list", json!({})).await.unwrap();
+        let result = service.handle(&AdiCallerContext::anonymous(), "list", json!({})).await.unwrap();
         match result {
             AdiHandleResult::Success(data) => {
                 let tasks = data.as_array().unwrap();
@@ -843,7 +844,7 @@ mod tests {
 
         // Create a task - should emit event
         let _ = service
-            .handle("create", json!({"title": "Subscribed task"}))
+            .handle(&AdiCallerContext::anonymous(), "create", json!({"title": "Subscribed task"}))
             .await
             .unwrap();
 
@@ -863,7 +864,7 @@ mod tests {
 
         // Create a task
         let result = service
-            .handle("create", json!({"title": "Status test"}))
+            .handle(&AdiCallerContext::anonymous(), "create", json!({"title": "Status test"}))
             .await
             .unwrap();
         
@@ -877,7 +878,7 @@ mod tests {
 
         // Update status
         let _ = service
-            .handle("update", json!({"task_id": task_id, "status": "in_progress"}))
+            .handle(&AdiCallerContext::anonymous(), "update", json!({"task_id": task_id, "status": "in_progress"}))
             .await
             .unwrap();
 
@@ -899,11 +900,11 @@ mod tests {
 
         // Create two tasks
         let r1 = service
-            .handle("create", json!({"title": "Task 1"}))
+            .handle(&AdiCallerContext::anonymous(), "create", json!({"title": "Task 1"}))
             .await
             .unwrap();
         let r2 = service
-            .handle("create", json!({"title": "Task 2"}))
+            .handle(&AdiCallerContext::anonymous(), "create", json!({"title": "Task 2"}))
             .await
             .unwrap();
 
@@ -919,6 +920,7 @@ mod tests {
         // Add dependency: Task 2 depends on Task 1
         let result = service
             .handle(
+                &AdiCallerContext::anonymous(),
                 "add_dependency",
                 json!({"from_task_id": id2, "to_task_id": id1}),
             )
@@ -932,7 +934,7 @@ mod tests {
 
         // Get task 2 with dependencies
         let result = service
-            .handle("get", json!({"task_id": id2}))
+            .handle(&AdiCallerContext::anonymous(), "get", json!({"task_id": id2}))
             .await
             .unwrap();
 
@@ -953,16 +955,16 @@ mod tests {
 
         // Create tasks
         service
-            .handle("create", json!({"title": "Task 1"}))
+            .handle(&AdiCallerContext::anonymous(), "create", json!({"title": "Task 1"}))
             .await
             .unwrap();
         service
-            .handle("create", json!({"title": "Task 2"}))
+            .handle(&AdiCallerContext::anonymous(), "create", json!({"title": "Task 2"}))
             .await
             .unwrap();
 
         // Get stats
-        let result = service.handle("stats", json!({})).await.unwrap();
+        let result = service.handle(&AdiCallerContext::anonymous(), "stats", json!({})).await.unwrap();
         match result {
             AdiHandleResult::Success(data) => {
                 assert_eq!(data["total_tasks"], 2);
