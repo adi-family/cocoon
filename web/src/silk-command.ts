@@ -25,6 +25,33 @@ export interface SilkInteractiveRequiredEvent {
   ptySessionId: string;
 }
 
+export interface SilkSelectOption {
+  label: string;
+  description?: string;
+  disabled: boolean;
+}
+
+export type SilkInputRequest =
+  | { type: 'select'; id: string; prompt: string; options: SilkSelectOption[]; default?: number }
+  | { type: 'multi_select'; id: string; prompt: string; options: SilkSelectOption[]; defaults: number[]; min?: number; max?: number }
+  | { type: 'confirm'; id: string; prompt: string; default?: boolean }
+  | { type: 'input'; id: string; prompt: string; default?: string; placeholder?: string }
+  | { type: 'password'; id: string; prompt: string };
+
+const INPUT_REQUEST_TYPES = new Set(['select', 'multi_select', 'confirm', 'input', 'password']);
+
+function tryParseInputRequest(line: string): SilkInputRequest | null {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith('{')) return null;
+  try {
+    const obj = JSON.parse(trimmed);
+    if (obj && typeof obj.type === 'string' && INPUT_REQUEST_TYPES.has(obj.type) && typeof obj.id === 'string') {
+      return obj as SilkInputRequest;
+    }
+  } catch { /* not JSON */ }
+  return null;
+}
+
 type Listener<T> = (event: T) => void;
 type SendFn = (request: SilkRequest) => void;
 
@@ -38,6 +65,7 @@ export class SilkCommand {
   private readonly interactiveListeners: Listener<SilkInteractiveRequiredEvent>[] = [];
   private readonly completedListeners: Listener<SilkCompletedEvent>[] = [];
   private readonly errorListeners: Listener<SilkCommandError>[] = [];
+  private readonly inputRequestListeners: Listener<SilkInputRequest>[] = [];
 
   constructor(commandId: string, sessionId: string, send: SendFn) {
     this.commandId = commandId;
@@ -73,6 +101,10 @@ export class SilkCommand {
     });
   }
 
+  respondToInput(response: string): void {
+    this.input(response);
+  }
+
   onOutput(fn: Listener<SilkOutputEvent>): () => void {
     this.outputListeners.push(fn);
     return () => { const i = this.outputListeners.indexOf(fn); if (i >= 0) this.outputListeners.splice(i, 1); };
@@ -98,8 +130,30 @@ export class SilkCommand {
     return () => { const i = this.errorListeners.indexOf(fn); if (i >= 0) this.errorListeners.splice(i, 1); };
   }
 
+  onInputRequest(fn: Listener<SilkInputRequest>): () => void {
+    this.inputRequestListeners.push(fn);
+    return () => { const i = this.inputRequestListeners.indexOf(fn); if (i >= 0) this.inputRequestListeners.splice(i, 1); };
+  }
+
   /** @internal */
   _emitOutput(stream: SilkStream, data: string, html?: SilkHtmlSpan[]): void {
+    if (stream === 'stdout' && this.inputRequestListeners.length > 0) {
+      const lines = data.split('\n');
+      const nonInputLines: string[] = [];
+      for (const line of lines) {
+        const req = tryParseInputRequest(line);
+        if (req) {
+          for (const fn of this.inputRequestListeners) fn(req);
+        } else {
+          nonInputLines.push(line);
+        }
+      }
+      const remaining = nonInputLines.join('\n');
+      if (remaining.trim()) {
+        for (const fn of this.outputListeners) fn({ stream, data: remaining, html });
+      }
+      return;
+    }
     for (const fn of this.outputListeners) fn({ stream, data, html });
   }
 
@@ -129,5 +183,6 @@ export class SilkCommand {
     this.interactiveListeners.length = 0;
     this.completedListeners.length = 0;
     this.errorListeners.length = 0;
+    this.inputRequestListeners.length = 0;
   }
 }

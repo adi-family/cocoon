@@ -6,7 +6,7 @@
 
 use crate::protocol::types::SilkHtmlSpan;
 use std::collections::HashMap;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use uuid::Uuid;
 
 use lib_env_parse::{env_vars, env_opt};
@@ -65,6 +65,8 @@ pub struct RunningCommand {
     pub child: Option<Child>,
     /// For interactive: PTY session ID (reuses cocoon PTY infrastructure)
     pub pty_session_id: Option<Uuid>,
+    /// Stdin handle for non-interactive commands (for writing input responses)
+    pub stdin: Option<ChildStdin>,
 }
 
 impl SilkSession {
@@ -138,6 +140,7 @@ impl SilkSession {
                     interactive: true,
                     child: None,
                     pty_session_id: None,
+                    stdin: None,
                 },
             );
             return Ok((true, None));
@@ -175,6 +178,7 @@ impl SilkSession {
                 interactive: false,
                 child: None, // We return the child, caller manages it
                 pty_session_id: None,
+                stdin: None,
             },
         );
 

@@ -1623,6 +1623,16 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                                                 .await;
                                             drop(w);
 
+                                            // Store stdin for input forwarding
+                                            if let Some(stdin) = child.stdin.take() {
+                                                let mut silk_lock = silk_sessions_clone.lock().await;
+                                                if let Some(session) = silk_lock.get_mut(&session_id) {
+                                                    if let Some(cmd) = session.running_commands.get_mut(&command_id_for_spawn) {
+                                                        cmd.stdin = Some(stdin);
+                                                    }
+                                                }
+                                            }
+
                                             // Spawn task to read output
                                             tokio::spawn(async move {
                                                 let command_id = command_id_for_spawn;
@@ -1778,10 +1788,10 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                             command_id,
                             data,
                         } => {
-                            // For interactive commands, forward to PTY
-                            let silk_sessions = silk_sessions_clone.lock().await;
-                            if let Some(session) = silk_sessions.get(&session_id) {
-                                if let Some(cmd) = session.running_commands.get(&command_id) {
+                            // Forward input to PTY (interactive) or child stdin (non-interactive)
+                            let mut silk_sessions = silk_sessions_clone.lock().await;
+                            if let Some(session) = silk_sessions.get_mut(&session_id) {
+                                if let Some(cmd) = session.running_commands.get_mut(&command_id) {
                                     if let Some(pty_session_id) = cmd.pty_session_id {
                                         drop(silk_sessions);
                                         let mut pty_sessions = sessions_clone.lock().await;
@@ -1812,12 +1822,28 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                                                 },
                                             ))
                                         }
+                                    } else if let Some(ref mut stdin) = cmd.stdin {
+                                        // Non-interactive command: write to child stdin
+                                        use std::io::Write;
+                                        if let Err(e) = writeln!(stdin, "{}", data) {
+                                            Some(CommandResponse::SilkResponse(
+                                                SilkResponse::Error {
+                                                    session_id: Some(session_id),
+                                                    command_id: Some(command_id),
+                                                    code: "input_failed".to_string(),
+                                                    message: e.to_string(),
+                                                },
+                                            ))
+                                        } else {
+                                            let _ = stdin.flush();
+                                            None
+                                        }
                                     } else {
                                         Some(CommandResponse::SilkResponse(SilkResponse::Error {
                                             session_id: Some(session_id),
                                             command_id: Some(command_id),
-                                            code: "not_interactive".to_string(),
-                                            message: "Command is not in interactive mode"
+                                            code: "stdin_closed".to_string(),
+                                            message: "Command stdin is not available"
                                                 .to_string(),
                                         }))
                                     }
