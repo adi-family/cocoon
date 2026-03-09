@@ -1061,7 +1061,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         let tool_count = tools_service.list_all_tools().len();
         router.register(std::sync::Arc::new(tools_service));
         tracing::info!("📦 Registered ADI service: tools ({} tools)", tool_count);
-        
+
         router
     };
 

@@ -39,6 +39,11 @@ export type SignalingMessage =
   | { type: 'adi_subscription_event'; subscription_id: string; event: string; data: unknown }
   | { type: 'adi_subscription_error'; request_id: string; code: string; message: string }
 
+  // ── plugin ──
+  | { type: 'plugin_install_plugin'; request_id: string; plugin_id: string; registry?: string; version?: string }
+  | { type: 'plugin_install_plugin_response'; request_id: string; success: boolean; plugin_id: string; stdout: string; stderr: string }
+  | { type: 'plugin_install_error'; request_id: string; plugin_id: string; code: string; message: string }
+
   // ── webrtc ──
   | { type: 'webrtc_start_session'; session_id: string; device_id: string; user_id?: string; data_channels?: string[] }
   | { type: 'webrtc_offer'; session_id: string; sdp: string }

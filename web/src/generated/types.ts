@@ -51,3 +51,11 @@ export interface AdiServiceInfo {
   methods: AdiMethodInfo[];
   capabilities: AdiServiceCapabilities;
 }
+
+export interface PluginInstallResult {
+  request_id: string;
+  success: boolean;
+  plugin_id: string;
+  stdout: string;
+  stderr: string;
+}

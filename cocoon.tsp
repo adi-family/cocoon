@@ -161,6 +161,25 @@ interface Adi {
     subscriptionError(request_id: string, code: string, message: string): void;
 }
 
+// ── Plugin Channel ─────────────────────────────────────────
+
+model PluginInstallResult {
+    request_id: string;
+    success: boolean;
+    plugin_id: string;
+    stdout: string;
+    stderr: string;
+}
+
+@channel("plugin")
+interface Plugin {
+    @request
+    installPlugin(request_id: string, plugin_id: string, registry?: string, version?: string): PluginInstallResult;
+
+    @event
+    installError(request_id: string, plugin_id: string, code: string, message: string): void;
+}
+
 // ── WebRTC Channel ──────────────────────────────────────────
 
 @channel("webrtc")

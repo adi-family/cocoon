@@ -9,6 +9,7 @@ pub mod tasks;
 #[cfg(feature = "kb-core")]
 pub mod knowledgebase;
 
+pub mod plugin;
 pub mod tools;
 
 #[cfg(feature = "credentials-core")]
