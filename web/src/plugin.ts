@@ -105,6 +105,9 @@ export class CocoonPlugin extends AdiPlugin implements CocoonApi {
       PLUGIN_ID,
     );
 
+    const signalingApi = this.app.api('adi.signaling');
+    this.lastDevices = [...signalingApi.allDevices()];
+
     this.unsubs.push(
       this.bus.on('cocoon:session-created', () => this.syncViews(), PLUGIN_ID),
       this.bus.on('cocoon:session-closed', () => this.syncViews(), PLUGIN_ID),
