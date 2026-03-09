@@ -3,6 +3,7 @@ import { Logger, trace, type EventBus } from '@adi-family/sdk-plugin';
 import type { SilkResponse } from './silk-types';
 import { SilkSession } from './silk-session';
 import { CocoonWebRTC, type WebRTCConfig } from './cocoon-webrtc';
+import { CocoonConnection } from './cocoon-connection';
 import { CocoonBusKey } from './bus';
 import './bus';
 
@@ -36,6 +37,10 @@ export class CocoonClient {
     this.unsubs.push(
       this.webrtc.onMessage((msg) => this.handleSilkMsg(msg)),
     );
+  }
+
+  createConnection(): CocoonConnection {
+    return new CocoonConnection(this.cocoonId, this.webrtc);
   }
 
   getSession(sessionId: string): SilkSession | undefined {

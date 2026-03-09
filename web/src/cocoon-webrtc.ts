@@ -8,14 +8,16 @@ export interface WebRTCConfig {
   iceServers?: RTCIceServer[];
 }
 
-/** Manages a WebRTC peer connection to a cocoon device for silk channel traffic. */
+/** Manages a WebRTC peer connection to a cocoon device for silk and adi channel traffic. */
 export class CocoonWebRTC {
   private pc: RTCPeerConnection | null = null;
   private silkDc: RTCDataChannel | null = null;
+  private adiDc: RTCDataChannel | null = null;
   private readonly sessionId = typeof crypto.randomUUID === 'function'
     ? crypto.randomUUID()
     : Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('-');
   private readonly msgHandlers: ((msg: unknown) => void)[] = [];
+  private readonly adiMsgHandlers: ((msg: unknown) => void)[] = [];
   private connectPromise: Promise<void> | null = null;
   private pendingIceCandidates: RTCIceCandidateInit[] = [];
   private signalUnsub: (() => void) | null = null;
@@ -31,7 +33,7 @@ export class CocoonWebRTC {
   ) {}
 
   get connected(): boolean {
-    return this.silkDc?.readyState === 'open';
+    return this.silkDc?.readyState === 'open' && this.adiDc?.readyState === 'open';
   }
 
   connect(): Promise<void> {
@@ -59,14 +61,35 @@ export class CocoonWebRTC {
     };
   }
 
+  sendAdi(msg: unknown): void {
+    const state = this.adiDc?.readyState;
+    if (state === 'open') {
+      const json = JSON.stringify(msg);
+      console.log(`[CocoonWebRTC] sendAdi: ${json.slice(0, 200)} (${json.length} bytes) dcState=${state}`);
+      this.adiDc!.send(json);
+    } else {
+      console.error(`[CocoonWebRTC] sendAdi FAILED: adi DC not open (state=${state})`);
+    }
+  }
+
+  onAdiMessage(handler: (msg: unknown) => void): () => void {
+    this.adiMsgHandlers.push(handler);
+    return () => {
+      const i = this.adiMsgHandlers.indexOf(handler);
+      if (i >= 0) this.adiMsgHandlers.splice(i, 1);
+    };
+  }
+
   dispose(): void {
     this.signalUnsub?.();
     this.signalUnsub = null;
     this.answerReject?.(new Error('CocoonWebRTC disposed'));
     this.answerResolve = null;
     this.answerReject = null;
+    this.adiDc?.close();
     this.silkDc?.close();
     this.pc?.close();
+    this.adiDc = null;
     this.silkDc = null;
     this.pc = null;
     this.connectPromise = null;
@@ -78,7 +101,8 @@ export class CocoonWebRTC {
     console.log(`[CocoonWebRTC] ICE servers:`, iceServers);
     this.pc = new RTCPeerConnection({ iceServers });
     this.silkDc = this.pc.createDataChannel('silk');
-    console.log(`[CocoonWebRTC] PC created, silk DC created`);
+    this.adiDc = this.pc.createDataChannel('adi');
+    console.log(`[CocoonWebRTC] PC created, silk+adi DC created`);
 
     // Log all PC state changes
     this.pc.onconnectionstatechange = () => {
@@ -112,6 +136,28 @@ export class CocoonWebRTC {
           : new TextDecoder().decode(e.data as ArrayBuffer);
         const msg = JSON.parse(text) as unknown;
         for (const fn of this.msgHandlers) fn(msg);
+      } catch {
+        // ignore parse errors
+      }
+    };
+
+    this.adiDc.onopen = () => {
+      console.warn(`[CocoonWebRTC] adi DC OPENED session=${this.sessionId}`);
+    };
+    this.adiDc.onclose = () => {
+      console.warn(`[CocoonWebRTC] adi DC CLOSED session=${this.sessionId}`);
+    };
+    this.adiDc.onerror = (e) => {
+      console.error(`[CocoonWebRTC] adi DC ERROR session=${this.sessionId}`, e);
+    };
+    this.adiDc.binaryType = 'arraybuffer';
+    this.adiDc.onmessage = (e) => {
+      try {
+        const text = typeof e.data === 'string'
+          ? e.data
+          : new TextDecoder().decode(e.data as ArrayBuffer);
+        const msg = JSON.parse(text) as unknown;
+        for (const fn of this.adiMsgHandlers) fn(msg);
       } catch {
         // ignore parse errors
       }
@@ -169,7 +215,7 @@ export class CocoonWebRTC {
         session_id: this.sessionId,
         device_id: this.cocoonId,
         user_id: this.userId,
-        data_channels: ['silk'],
+        data_channels: ['silk', 'adi'],
       },
     });
 
@@ -205,14 +251,20 @@ export class CocoonWebRTC {
   }
 
   private waitForDcOpen(): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
-      if (!this.silkDc) { reject(new Error('No data channel')); return; }
-      if (this.silkDc.readyState === 'open') { resolve(); return; }
+    const waitForChannel = (dc: RTCDataChannel | null, name: string): Promise<void> =>
+      new Promise<void>((resolve, reject) => {
+        if (!dc) { reject(new Error(`No ${name} data channel`)); return; }
+        if (dc.readyState === 'open') { resolve(); return; }
 
-      const timer = setTimeout(() => reject(new Error('Data channel open timeout')), CONNECT_TIMEOUT_MS);
-      this.silkDc.onopen = () => { clearTimeout(timer); resolve(); };
-      this.silkDc.onerror = (e) => { clearTimeout(timer); reject(e); };
-    });
+        const timer = setTimeout(() => reject(new Error(`${name} data channel open timeout`)), CONNECT_TIMEOUT_MS);
+        dc.onopen = () => { clearTimeout(timer); resolve(); };
+        dc.onerror = (e) => { clearTimeout(timer); reject(e); };
+      });
+
+    return Promise.all([
+      waitForChannel(this.silkDc, 'silk'),
+      waitForChannel(this.adiDc, 'adi'),
+    ]).then(() => {});
   }
 
   private async handleSignalingMsg(payload: unknown): Promise<void> {

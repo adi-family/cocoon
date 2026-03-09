@@ -15,6 +15,7 @@
     "dev": "vite build --watch"
   },
   "dependencies": {
+    "@adi-family/cocoon-plugin-interface": "workspace:*",
     "@adi-family/sdk-plugin": "workspace:*",
     "@adi/auth-web-plugin": "workspace:*",
     "@adi/debug-screen-web-plugin": "workspace:*",

@@ -19,6 +19,7 @@ export default defineConfig({
     },
   },
   build: {
+    outDir: "../../../dist/cocoon",
     lib: {
       entry: "src/index.ts",
       formats: ["es"],

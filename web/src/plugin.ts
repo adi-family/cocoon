@@ -3,8 +3,9 @@ import '@adi/signaling-web-plugin';
 import { AdiPlugin } from '@adi-family/sdk-plugin';
 import { AdiDebugScreenBusKey } from '@adi/debug-screen-web-plugin/bus';
 import { AdiSignalingBusKey, type DeviceInfo } from '@adi/signaling-web-plugin/bus';
-import { AdiRouterBusKey } from '@adi/router-web-plugin/bus';
+import { CocoonBusKey } from '@adi-family/cocoon-plugin-interface';
 import { CocoonClient } from './cocoon-client';
+import { CocoonConnection } from './cocoon-connection';
 import type { WebRTCConfig } from './cocoon-webrtc';
 import { PLUGIN_ID, PLUGIN_VERSION } from './config';
 import type { AdiCocoonDebugElement, CocoonDebugInfo } from './debug-section';
@@ -23,6 +24,7 @@ export class CocoonPlugin extends AdiPlugin implements CocoonApi {
   readonly version = PLUGIN_VERSION;
 
   private readonly clients = new Map<string, CocoonClient>();
+  private readonly connections = new Map<string, CocoonConnection>();
   private debugEl: AdiCocoonDebugElement | null = null;
   private listEl: AdiCocoonListElement | null = null;
   private lastDevices: DeviceInfo[] = [];
@@ -49,6 +51,11 @@ export class CocoonPlugin extends AdiPlugin implements CocoonApi {
 
     const client = new CocoonClient(cocoonId, server, this.bus, rtcConfig);
     this.clients.set(cocoonId, client);
+
+    const connection = client.createConnection();
+    this.connections.set(cocoonId, connection);
+    this.bus.emit(CocoonBusKey.ConnectionAdded, { id: cocoonId, connection }, PLUGIN_ID);
+
     this.syncViews();
     return client;
   }
@@ -56,6 +63,14 @@ export class CocoonPlugin extends AdiPlugin implements CocoonApi {
   removeClient(cocoonId: string): void {
     const client = this.clients.get(cocoonId);
     if (!client) return;
+
+    const connection = this.connections.get(cocoonId);
+    if (connection) {
+      connection.dispose();
+      this.connections.delete(cocoonId);
+      this.bus.emit(CocoonBusKey.ConnectionRemoved, { id: cocoonId }, PLUGIN_ID);
+    }
+
     client.dispose();
     this.clients.delete(cocoonId);
     this.syncViews();
@@ -71,24 +86,16 @@ export class CocoonPlugin extends AdiPlugin implements CocoonApi {
       customElements.define('adi-cocoon-list', AdiCocoonListElement);
     }
 
-    this.bus.emit(AdiRouterBusKey.RegisterRoute, {
-      pluginId: PLUGIN_ID,
-      path: '',
-      init: () => {
-        this.listEl = document.createElement('adi-cocoon-list') as AdiCocoonListElement;
-        this.listEl.subtokenProvider = () => this.getSetupSubtoken();
-        this.listEl.addEventListener('setup-connect', ((e: CustomEvent<SetupConnectEvent>) => {
-          const url = e.detail.signalingUrl;
-          const signalingApi = this.app.api('adi.signaling');
-          if (!signalingApi.getServer(url)) {
-            signalingApi.addServer(url);
-          }
-        }) as EventListener);
-        this.syncList();
-        return this.listEl;
-      },
-      label: 'Cocoons',
-    }, PLUGIN_ID);
+    this.listEl = document.createElement('adi-cocoon-list') as AdiCocoonListElement;
+    this.listEl.subtokenProvider = () => this.getSetupSubtoken();
+    this.listEl.addEventListener('setup-connect', ((e: CustomEvent<SetupConnectEvent>) => {
+      const url = e.detail.signalingUrl;
+      const signalingApi = this.app.api('adi.signaling');
+      if (!signalingApi.getServer(url)) {
+        signalingApi.addServer(url);
+      }
+    }) as EventListener);
+    this.syncList();
 
     this.bus.emit(
       AdiDebugScreenBusKey.RegisterSection,
@@ -122,6 +129,8 @@ export class CocoonPlugin extends AdiPlugin implements CocoonApi {
   override onUnregister(): void {
     this.unsubs.forEach((fn) => fn());
     this.unsubs.length = 0;
+    for (const conn of this.connections.values()) conn.dispose();
+    this.connections.clear();
     for (const client of this.clients.values()) client.dispose();
     this.clients.clear();
   }
