@@ -1,6 +1,8 @@
 import type { Connection } from '@adi-family/plugin-signaling/bus';
 import type { CocoonWebRTC } from './cocoon-webrtc';
 import type { SignalingMessage } from './generated/messages';
+import { buildRequestFrame, parseResponseFrame, decodePayloadJson, decodePayloadText } from './adi-frame';
+import type { ResponseStatus } from './adi-frame';
 
 const genId = (): string => {
   if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
@@ -32,14 +34,16 @@ export class CocoonConnection implements Connection {
 
   private readonly pending = new Map<string, Pending>();
   private readonly streams = new Map<string, StreamPending>();
-  private unsub: (() => void) | null = null;
+  private unsubText: (() => void) | null = null;
+  private unsubBinary: (() => void) | null = null;
 
   constructor(
     cocoonId: string,
     private readonly webrtc: CocoonWebRTC,
   ) {
     this.id = cocoonId;
-    this.unsub = webrtc.onAdiMessage((msg) => this.handleMessage(msg));
+    this.unsubText = webrtc.onAdiMessage((msg) => this.handleMessage(msg));
+    this.unsubBinary = webrtc.onAdiBinaryMessage((data) => this.handleBinaryFrame(data));
   }
 
   async request<T>(plugin: string, method: string, params?: unknown): Promise<T> {
@@ -50,13 +54,7 @@ export class CocoonConnection implements Connection {
         resolve: resolve as (data: unknown) => void,
         reject,
       });
-      this.webrtc.sendAdi({
-        type: 'adi_request',
-        request_id: requestId,
-        plugin,
-        method,
-        params: params ?? {},
-      });
+      this.webrtc.sendAdiBinary(buildRequestFrame(requestId, plugin, method, params));
     });
   }
 
@@ -74,13 +72,7 @@ export class CocoonConnection implements Connection {
       reject: (err) => { error = err; notify?.(); },
     });
 
-    this.webrtc.sendAdi({
-      type: 'adi_request',
-      request_id: requestId,
-      plugin,
-      method,
-      params: params ?? {},
-    });
+    this.webrtc.sendAdiBinary(buildRequestFrame(requestId, plugin, method, params, true));
 
     try {
       while (true) {
@@ -163,14 +155,70 @@ export class CocoonConnection implements Connection {
   }
 
   dispose(): void {
-    this.unsub?.();
-    this.unsub = null;
+    this.unsubText?.();
+    this.unsubText = null;
+    this.unsubBinary?.();
+    this.unsubBinary = null;
     for (const p of this.pending.values()) p.reject(new Error('Connection disposed'));
     this.pending.clear();
     for (const s of this.streams.values()) s.reject(new Error('Connection disposed'));
     this.streams.clear();
   }
 
+  private handleBinaryFrame(data: ArrayBuffer): void {
+    try {
+      const { header, payload } = parseResponseFrame(data);
+      const requestId = header.id;
+
+      const statusHandlers: Record<ResponseStatus, () => void> = {
+        success: () => {
+          const result = decodePayloadJson(payload);
+          this.pending.get(requestId)?.resolve(result);
+          this.pending.delete(requestId);
+        },
+        error: () => {
+          const message = decodePayloadText(payload);
+          this.pending.get(requestId)?.reject(new Error(message));
+          this.pending.delete(requestId);
+          const stream = this.streams.get(requestId);
+          if (stream) { stream.reject(new Error(message)); this.streams.delete(requestId); }
+        },
+        plugin_not_found: () => {
+          const message = decodePayloadText(payload);
+          this.pending.get(requestId)?.reject(new Error(`Plugin not found: ${message}`));
+          this.pending.delete(requestId);
+        },
+        method_not_found: () => {
+          const message = decodePayloadText(payload);
+          this.pending.get(requestId)?.reject(new Error(`Method not found: ${message}`));
+          this.pending.delete(requestId);
+        },
+        invalid_request: () => {
+          const message = decodePayloadText(payload);
+          this.pending.get(requestId)?.reject(new Error(`Invalid request: ${message}`));
+          this.pending.delete(requestId);
+        },
+        stream_chunk: () => {
+          const stream = this.streams.get(requestId);
+          if (stream) stream.push(decodePayloadJson(payload));
+        },
+        stream_end: () => {
+          const stream = this.streams.get(requestId);
+          if (stream) {
+            if (payload.length > 0) stream.push(decodePayloadJson(payload));
+            stream.done();
+            this.streams.delete(requestId);
+          }
+        },
+      };
+
+      statusHandlers[header.status]?.();
+    } catch (err) {
+      console.error('[CocoonConnection] failed to parse binary frame:', err);
+    }
+  }
+
+  /** Handle text JSON messages (discovery, subscriptions, legacy). */
   private handleMessage(msg: unknown): void {
     if (!msg || typeof msg !== 'object' || !('type' in msg)) return;
     const m = msg as Record<string, unknown>;

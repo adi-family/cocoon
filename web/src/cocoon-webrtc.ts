@@ -18,6 +18,7 @@ export class CocoonWebRTC {
     : Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('-');
   private readonly msgHandlers: ((msg: unknown) => void)[] = [];
   private readonly adiMsgHandlers: ((msg: unknown) => void)[] = [];
+  private readonly adiBinaryHandlers: ((data: ArrayBuffer) => void)[] = [];
   private connectPromise: Promise<void> | null = null;
   private pendingIceCandidates: RTCIceCandidateInit[] = [];
   private signalUnsub: (() => void) | null = null;
@@ -77,6 +78,25 @@ export class CocoonWebRTC {
     return () => {
       const i = this.adiMsgHandlers.indexOf(handler);
       if (i >= 0) this.adiMsgHandlers.splice(i, 1);
+    };
+  }
+
+  /** Send a binary frame on the adi data channel. */
+  sendAdiBinary(data: ArrayBuffer): void {
+    const state = this.adiDc?.readyState;
+    if (state === 'open') {
+      this.adiDc!.send(data);
+    } else {
+      console.error(`[CocoonWebRTC] sendAdiBinary FAILED: adi DC not open (state=${state})`);
+    }
+  }
+
+  /** Register a handler for binary messages on the adi data channel. */
+  onAdiBinaryMessage(handler: (data: ArrayBuffer) => void): () => void {
+    this.adiBinaryHandlers.push(handler);
+    return () => {
+      const i = this.adiBinaryHandlers.indexOf(handler);
+      if (i >= 0) this.adiBinaryHandlers.splice(i, 1);
     };
   }
 
@@ -153,11 +173,15 @@ export class CocoonWebRTC {
     this.adiDc.binaryType = 'arraybuffer';
     this.adiDc.onmessage = (e) => {
       try {
-        const text = typeof e.data === 'string'
-          ? e.data
-          : new TextDecoder().decode(e.data as ArrayBuffer);
-        const msg = JSON.parse(text) as unknown;
-        for (const fn of this.adiMsgHandlers) fn(msg);
+        if (typeof e.data === 'string') {
+          // Text frame: JSON discovery/subscription messages
+          const msg = JSON.parse(e.data) as unknown;
+          for (const fn of this.adiMsgHandlers) fn(msg);
+        } else {
+          // Binary frame: ADI binary protocol
+          const buf = e.data as ArrayBuffer;
+          for (const fn of this.adiBinaryHandlers) fn(buf);
+        }
       } catch {
         // ignore parse errors
       }

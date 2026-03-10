@@ -9,6 +9,7 @@
 
 use crate::adi_router::{AdiCallerContext, AdiHandleResult, AdiService, AdiServiceError};
 use async_trait::async_trait;
+use bytes::Bytes;
 use crate::protocol::types::AdiMethodInfo;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
@@ -18,6 +19,10 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::RwLock;
+
+fn json_to_bytes(value: JsonValue) -> Bytes {
+    Bytes::from(serde_json::to_vec(&value).unwrap())
+}
 
 // ============================================================================
 // Tool Types
@@ -935,7 +940,7 @@ impl ToolsService {
             })
             .collect();
 
-        Ok(AdiHandleResult::Success(json!(tools)))
+        Ok(AdiHandleResult::Success(json_to_bytes(json!(tools))))
     }
 
     /// Handle call method
@@ -964,8 +969,8 @@ impl ToolsService {
 
         // Call the tool
         match provider.call_tool(name, arguments).await {
-            Ok(result) => Ok(AdiHandleResult::Success(json!(result))),
-            Err(e) => Ok(AdiHandleResult::Success(json!(ToolResult::error(e)))),
+            Ok(result) => Ok(AdiHandleResult::Success(json_to_bytes(json!(result)))),
+            Err(e) => Ok(AdiHandleResult::Success(json_to_bytes(json!(ToolResult::error(e))))),
         }
     }
 
@@ -985,13 +990,13 @@ impl ToolsService {
             .find(|t| t.name == name)
             .ok_or_else(|| AdiServiceError::not_found(format!("Tool not found: {}", name)))?;
 
-        Ok(AdiHandleResult::Success(json!({
+        Ok(AdiHandleResult::Success(json_to_bytes(json!({
             "name": tool.name,
             "description": tool.description,
             "input_schema": tool.input_schema,
             "category": tool.category,
             "source": tool.source
-        })))
+        }))))
     }
 
     /// Handle providers method
@@ -1007,7 +1012,7 @@ impl ToolsService {
             })
             .collect();
 
-        Ok(AdiHandleResult::Success(json!(providers)))
+        Ok(AdiHandleResult::Success(json_to_bytes(json!(providers))))
     }
 }
 
@@ -1093,8 +1098,10 @@ impl AdiService for ToolsService {
         &self,
         _ctx: &AdiCallerContext,
         method: &str,
-        params: JsonValue,
+        payload: Bytes,
     ) -> Result<AdiHandleResult, AdiServiceError> {
+        let params: JsonValue = serde_json::from_slice(&payload)
+            .map_err(|e| AdiServiceError::invalid_params(e.to_string()))?;
         match method {
             "list" => self.handle_list(params).await,
             "call" => self.handle_call(params).await,
@@ -1109,26 +1116,33 @@ impl AdiService for ToolsService {
 mod tests {
     use super::*;
 
+    fn to_payload(v: JsonValue) -> Bytes {
+        json_to_bytes(v)
+    }
+
+    fn parse_success(result: AdiHandleResult) -> JsonValue {
+        match result {
+            AdiHandleResult::Success(data) => serde_json::from_slice(&data).unwrap(),
+            _ => panic!("Expected success"),
+        }
+    }
+
     #[tokio::test]
     async fn test_tools_service_list() {
         let service = ToolsService::new();
 
         let ctx = AdiCallerContext::anonymous();
-        let result = service.handle(&ctx, "list", json!({})).await.unwrap();
-        match result {
-            AdiHandleResult::Success(data) => {
-                let tools = data.as_array().unwrap();
-                assert!(!tools.is_empty());
-                // Should have at least shell_execute and file_read
-                let names: Vec<&str> = tools
-                    .iter()
-                    .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
-                    .collect();
-                assert!(names.contains(&"shell_execute"));
-                assert!(names.contains(&"file_read"));
-            }
-            _ => panic!("Expected success"),
-        }
+        let result = service.handle(&ctx, "list", to_payload(json!({}))).await.unwrap();
+        let data = parse_success(result);
+        let tools = data.as_array().unwrap();
+        assert!(!tools.is_empty());
+        // Should have at least shell_execute and file_read
+        let names: Vec<&str> = tools
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert!(names.contains(&"shell_execute"));
+        assert!(names.contains(&"file_read"));
     }
 
     #[tokio::test]
@@ -1140,29 +1154,25 @@ mod tests {
             .handle(
                 &ctx,
                 "call",
-                json!({
+                to_payload(json!({
                     "name": "shell_execute",
                     "arguments": {
                         "command": "echo 'hello world'"
                     }
-                }),
+                })),
             )
             .await
             .unwrap();
 
-        match result {
-            AdiHandleResult::Success(data) => {
-                let content = data.get("content").and_then(|c| c.as_str()).unwrap();
-                let parsed: JsonValue = serde_json::from_str(content).unwrap();
-                assert!(parsed.get("success").and_then(|s| s.as_bool()).unwrap());
-                assert!(parsed
-                    .get("stdout")
-                    .and_then(|s| s.as_str())
-                    .unwrap()
-                    .contains("hello world"));
-            }
-            _ => panic!("Expected success"),
-        }
+        let data = parse_success(result);
+        let content = data.get("content").and_then(|c| c.as_str()).unwrap();
+        let parsed: JsonValue = serde_json::from_str(content).unwrap();
+        assert!(parsed.get("success").and_then(|s| s.as_bool()).unwrap());
+        assert!(parsed
+            .get("stdout")
+            .and_then(|s| s.as_str())
+            .unwrap()
+            .contains("hello world"));
     }
 
     #[tokio::test]
@@ -1171,17 +1181,13 @@ mod tests {
 
         let ctx = AdiCallerContext::anonymous();
         let result = service
-            .handle(&ctx, "get_schema", json!({"name": "shell_execute"}))
+            .handle(&ctx, "get_schema", to_payload(json!({"name": "shell_execute"})))
             .await
             .unwrap();
 
-        match result {
-            AdiHandleResult::Success(data) => {
-                assert_eq!(data.get("name").and_then(|n| n.as_str()).unwrap(), "shell_execute");
-                assert!(data.get("input_schema").is_some());
-            }
-            _ => panic!("Expected success"),
-        }
+        let data = parse_success(result);
+        assert_eq!(data.get("name").and_then(|n| n.as_str()).unwrap(), "shell_execute");
+        assert!(data.get("input_schema").is_some());
     }
 
     #[tokio::test]
@@ -1189,14 +1195,10 @@ mod tests {
         let service = ToolsService::new();
 
         let ctx = AdiCallerContext::anonymous();
-        let result = service.handle(&ctx, "providers", json!({})).await.unwrap();
-        match result {
-            AdiHandleResult::Success(data) => {
-                let providers = data.as_array().unwrap();
-                assert!(providers.len() >= 2); // shell + filesystem
-            }
-            _ => panic!("Expected success"),
-        }
+        let result = service.handle(&ctx, "providers", to_payload(json!({}))).await.unwrap();
+        let data = parse_success(result);
+        let providers = data.as_array().unwrap();
+        assert!(providers.len() >= 2); // shell + filesystem
     }
 
     #[tokio::test]
@@ -1208,10 +1210,10 @@ mod tests {
             .handle(
                 &ctx,
                 "call",
-                json!({
+                to_payload(json!({
                     "name": "nonexistent_tool",
                     "arguments": {}
-                }),
+                })),
             )
             .await;
 

@@ -1044,7 +1044,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         {
             match crate::services::CredentialsService::from_env().await {
                 Ok(credentials_service) => {
-                    router.register(std::sync::Arc::new(credentials_service));
+                    let wrapped = crate::services::CredentialsServiceAdi::new(credentials_service);
+                    router.register(std::sync::Arc::new(wrapped));
                     tracing::info!("📦 Registered ADI plugin: adi.credentials");
                 }
                 Err(e) => {

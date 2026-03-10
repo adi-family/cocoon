@@ -15,11 +15,16 @@ use crate::adi_router::{
 };
 use tasks_core::{CreateTask, Task, TaskId, TaskManager, TaskStatus};
 use async_trait::async_trait;
+use bytes::Bytes;
 use crate::protocol::types::{AdiMethodInfo, AdiPluginCapabilities};
 use serde_json::{json, Value as JsonValue};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
+
+fn json_to_bytes(value: JsonValue) -> Bytes {
+    Bytes::from(serde_json::to_vec(&value).unwrap())
+}
 
 /// Tasks service for ADI router
 ///
@@ -92,7 +97,7 @@ impl TasksService {
                 .map_err(|e| AdiServiceError::internal(e.to_string()))?
         };
 
-        Ok(AdiHandleResult::Success(json!(tasks)))
+        Ok(AdiHandleResult::Success(json_to_bytes(json!(tasks))))
     }
 
     /// Handle create method
@@ -130,7 +135,7 @@ impl TasksService {
             self.broadcast_event("task_created", Self::task_to_json(&task));
         }
 
-        Ok(AdiHandleResult::Success(json!({ "task_id": task_id.get() })))
+        Ok(AdiHandleResult::Success(json_to_bytes(json!({ "task_id": task_id.get() }))))
     }
 
     /// Handle get method
@@ -145,7 +150,7 @@ impl TasksService {
             .get_task_with_dependencies(TaskId::new(task_id))
             .map_err(|e| AdiServiceError::not_found(e.to_string()))?;
 
-        Ok(AdiHandleResult::Success(json!(task_with_deps)))
+        Ok(AdiHandleResult::Success(json_to_bytes(json!(task_with_deps))))
     }
 
     /// Handle update method
@@ -197,7 +202,7 @@ impl TasksService {
             }));
         }
 
-        Ok(AdiHandleResult::Success(json!({ "task_id": task_id })))
+        Ok(AdiHandleResult::Success(json_to_bytes(json!({ "task_id": task_id }))))
     }
 
     /// Handle delete method
@@ -222,7 +227,7 @@ impl TasksService {
             "title": task_info.as_ref().map(|t| t.title.as_str())
         }));
 
-        Ok(AdiHandleResult::Success(json!({ "deleted": true })))
+        Ok(AdiHandleResult::Success(json_to_bytes(json!({ "deleted": true }))))
     }
 
     /// Handle search method
@@ -242,7 +247,7 @@ impl TasksService {
             .search(query, limit)
             .map_err(|e| AdiServiceError::internal(e.to_string()))?;
 
-        Ok(AdiHandleResult::Success(json!(tasks)))
+        Ok(AdiHandleResult::Success(json_to_bytes(json!(tasks))))
     }
 
     /// Handle ready method (tasks with no incomplete dependencies)
@@ -252,7 +257,7 @@ impl TasksService {
             .get_ready()
             .map_err(|e| AdiServiceError::internal(e.to_string()))?;
 
-        Ok(AdiHandleResult::Success(json!(tasks)))
+        Ok(AdiHandleResult::Success(json_to_bytes(json!(tasks))))
     }
 
     /// Handle blocked method
@@ -262,7 +267,7 @@ impl TasksService {
             .get_blocked()
             .map_err(|e| AdiServiceError::internal(e.to_string()))?;
 
-        Ok(AdiHandleResult::Success(json!(tasks)))
+        Ok(AdiHandleResult::Success(json_to_bytes(json!(tasks))))
     }
 
     /// Handle stats method
@@ -272,7 +277,7 @@ impl TasksService {
             .status()
             .map_err(|e| AdiServiceError::internal(e.to_string()))?;
 
-        Ok(AdiHandleResult::Success(json!(status)))
+        Ok(AdiHandleResult::Success(json_to_bytes(json!(status))))
     }
 
     /// Handle add_dependency method
@@ -295,9 +300,9 @@ impl TasksService {
             .add_dependency(TaskId::new(from_id), TaskId::new(to_id))
             .map_err(|e| AdiServiceError::internal(e.to_string()))?;
 
-        Ok(AdiHandleResult::Success(
+        Ok(AdiHandleResult::Success(json_to_bytes(
             json!({ "from_task_id": from_id, "to_task_id": to_id }),
-        ))
+        )))
     }
 
     /// Handle remove_dependency method
@@ -320,7 +325,7 @@ impl TasksService {
             .remove_dependency(TaskId::new(from_id), TaskId::new(to_id))
             .map_err(|e| AdiServiceError::internal(e.to_string()))?;
 
-        Ok(AdiHandleResult::Success(json!({ "removed": true })))
+        Ok(AdiHandleResult::Success(json_to_bytes(json!({ "removed": true }))))
     }
 
     /// Handle detect_cycles method
@@ -336,7 +341,7 @@ impl TasksService {
         // Convert Vec<Vec<TaskId>> to Vec<Vec<i64>> for JSON
         let cycles: Vec<Vec<i64>> = cycles.into_iter().map(|c| c.into_iter().map(|id| id.get()).collect()).collect();
 
-        Ok(AdiHandleResult::Success(json!({ "cycles": cycles })))
+        Ok(AdiHandleResult::Success(json_to_bytes(json!({ "cycles": cycles }))))
     }
 }
 
@@ -718,8 +723,10 @@ impl AdiService for TasksService {
         &self,
         _ctx: &AdiCallerContext,
         method: &str,
-        params: JsonValue,
+        payload: Bytes,
     ) -> Result<AdiHandleResult, AdiServiceError> {
+        let params: JsonValue = serde_json::from_slice(&payload)
+            .map_err(|e| AdiServiceError::invalid_params(e.to_string()))?;
         match method {
             "list" => self.handle_list(params).await,
             "create" => self.handle_create(params).await,
@@ -743,6 +750,17 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn to_payload(v: JsonValue) -> Bytes {
+        json_to_bytes(v)
+    }
+
+    fn parse_success(result: AdiHandleResult) -> JsonValue {
+        match result {
+            AdiHandleResult::Success(data) => serde_json::from_slice(&data).unwrap(),
+            _ => panic!("Expected success"),
+        }
+    }
+
     #[tokio::test]
     async fn test_tasks_service_create_and_list() {
         let dir = tempdir().unwrap();
@@ -750,27 +768,19 @@ mod tests {
 
         // Create a task
         let result = service
-            .handle(&AdiCallerContext::anonymous(), "create", json!({"title": "Test task", "description": "A test"}))
+            .handle(&AdiCallerContext::anonymous(), "create", to_payload(json!({"title": "Test task", "description": "A test"})))
             .await
             .unwrap();
 
-        match result {
-            AdiHandleResult::Success(data) => {
-                assert!(data.get("task_id").is_some());
-            }
-            _ => panic!("Expected success"),
-        }
+        let data = parse_success(result);
+        assert!(data.get("task_id").is_some());
 
         // List tasks
-        let result = service.handle(&AdiCallerContext::anonymous(), "list", json!({})).await.unwrap();
-        match result {
-            AdiHandleResult::Success(data) => {
-                let tasks = data.as_array().unwrap();
-                assert_eq!(tasks.len(), 1);
-                assert_eq!(tasks[0]["title"], "Test task");
-            }
-            _ => panic!("Expected success"),
-        }
+        let result = service.handle(&AdiCallerContext::anonymous(), "list", to_payload(json!({}))).await.unwrap();
+        let data = parse_success(result);
+        let tasks = data.as_array().unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0]["title"], "Test task");
     }
 
     #[test]
@@ -781,7 +791,7 @@ mod tests {
         assert_eq!(service.plugin_id(), "adi.tasks");
         assert_eq!(service.name(), "Task Management");
         assert!(service.description().is_some());
-        
+
         let caps = service.capabilities();
         assert!(caps.subscriptions);
         assert!(caps.notifications);
@@ -844,7 +854,7 @@ mod tests {
 
         // Create a task - should emit event
         let _ = service
-            .handle(&AdiCallerContext::anonymous(), "create", json!({"title": "Subscribed task"}))
+            .handle(&AdiCallerContext::anonymous(), "create", to_payload(json!({"title": "Subscribed task"})))
             .await
             .unwrap();
 
@@ -864,21 +874,19 @@ mod tests {
 
         // Create a task
         let result = service
-            .handle(&AdiCallerContext::anonymous(), "create", json!({"title": "Status test"}))
+            .handle(&AdiCallerContext::anonymous(), "create", to_payload(json!({"title": "Status test"})))
             .await
             .unwrap();
-        
-        let task_id = match result {
-            AdiHandleResult::Success(data) => data["task_id"].as_i64().unwrap(),
-            _ => panic!("Expected success"),
-        };
+
+        let data = parse_success(result);
+        let task_id = data["task_id"].as_i64().unwrap();
 
         // Consume the create event
         let _ = receiver.try_recv().unwrap();
 
         // Update status
         let _ = service
-            .handle(&AdiCallerContext::anonymous(), "update", json!({"task_id": task_id, "status": "in_progress"}))
+            .handle(&AdiCallerContext::anonymous(), "update", to_payload(json!({"task_id": task_id, "status": "in_progress"})))
             .await
             .unwrap();
 
@@ -900,52 +908,41 @@ mod tests {
 
         // Create two tasks
         let r1 = service
-            .handle(&AdiCallerContext::anonymous(), "create", json!({"title": "Task 1"}))
+            .handle(&AdiCallerContext::anonymous(), "create", to_payload(json!({"title": "Task 1"})))
             .await
             .unwrap();
         let r2 = service
-            .handle(&AdiCallerContext::anonymous(), "create", json!({"title": "Task 2"}))
+            .handle(&AdiCallerContext::anonymous(), "create", to_payload(json!({"title": "Task 2"})))
             .await
             .unwrap();
 
-        let id1 = match r1 {
-            AdiHandleResult::Success(d) => d["task_id"].as_i64().unwrap(),
-            _ => panic!("Expected success"),
-        };
-        let id2 = match r2 {
-            AdiHandleResult::Success(d) => d["task_id"].as_i64().unwrap(),
-            _ => panic!("Expected success"),
-        };
+        let d1 = parse_success(r1);
+        let d2 = parse_success(r2);
+        let id1 = d1["task_id"].as_i64().unwrap();
+        let id2 = d2["task_id"].as_i64().unwrap();
 
         // Add dependency: Task 2 depends on Task 1
         let result = service
             .handle(
                 &AdiCallerContext::anonymous(),
                 "add_dependency",
-                json!({"from_task_id": id2, "to_task_id": id1}),
+                to_payload(json!({"from_task_id": id2, "to_task_id": id1})),
             )
             .await
             .unwrap();
 
-        match result {
-            AdiHandleResult::Success(_) => {}
-            _ => panic!("Expected success"),
-        }
+        parse_success(result);
 
         // Get task 2 with dependencies
         let result = service
-            .handle(&AdiCallerContext::anonymous(), "get", json!({"task_id": id2}))
+            .handle(&AdiCallerContext::anonymous(), "get", to_payload(json!({"task_id": id2})))
             .await
             .unwrap();
 
-        match result {
-            AdiHandleResult::Success(data) => {
-                let depends_on = data["depends_on"].as_array().unwrap();
-                assert_eq!(depends_on.len(), 1);
-                assert_eq!(depends_on[0]["title"], "Task 1");
-            }
-            _ => panic!("Expected success"),
-        }
+        let data = parse_success(result);
+        let depends_on = data["depends_on"].as_array().unwrap();
+        assert_eq!(depends_on.len(), 1);
+        assert_eq!(depends_on[0]["title"], "Task 1");
     }
 
     #[tokio::test]
@@ -955,22 +952,18 @@ mod tests {
 
         // Create tasks
         service
-            .handle(&AdiCallerContext::anonymous(), "create", json!({"title": "Task 1"}))
+            .handle(&AdiCallerContext::anonymous(), "create", to_payload(json!({"title": "Task 1"})))
             .await
             .unwrap();
         service
-            .handle(&AdiCallerContext::anonymous(), "create", json!({"title": "Task 2"}))
+            .handle(&AdiCallerContext::anonymous(), "create", to_payload(json!({"title": "Task 2"})))
             .await
             .unwrap();
 
         // Get stats
-        let result = service.handle(&AdiCallerContext::anonymous(), "stats", json!({})).await.unwrap();
-        match result {
-            AdiHandleResult::Success(data) => {
-                assert_eq!(data["total_tasks"], 2);
-                assert_eq!(data["todo_count"], 2);
-            }
-            _ => panic!("Expected success"),
-        }
+        let result = service.handle(&AdiCallerContext::anonymous(), "stats", to_payload(json!({}))).await.unwrap();
+        let data = parse_success(result);
+        assert_eq!(data["total_tasks"], 2);
+        assert_eq!(data["todo_count"], 2);
     }
 }

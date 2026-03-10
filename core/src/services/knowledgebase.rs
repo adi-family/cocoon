@@ -7,12 +7,17 @@ use crate::adi_router::{
     AdiCallerContext, AdiHandleResult, AdiService, AdiServiceError, SubscriptionEvent, SubscriptionEventInfo,
 };
 use async_trait::async_trait;
+use bytes::Bytes;
 use kb_core::{EdgeType, Knowledgebase, NodeType};
 use crate::protocol::types::{AdiMethodInfo, AdiPluginCapabilities};
 use serde_json::{json, Value as JsonValue};
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
 use uuid::Uuid;
+
+fn json_to_bytes(value: JsonValue) -> Bytes {
+    Bytes::from(serde_json::to_vec(&value).unwrap())
+}
 
 /// Knowledgebase service for ADI router
 ///
@@ -82,7 +87,7 @@ impl KnowledgebaseService {
             .await
             .map_err(|e| AdiServiceError::internal(e.to_string()))?;
 
-        Ok(AdiHandleResult::Success(json!(results)))
+        Ok(AdiHandleResult::Success(json_to_bytes(json!(results))))
     }
 
     async fn handle_subgraph(
@@ -100,7 +105,7 @@ impl KnowledgebaseService {
             .await
             .map_err(|e| AdiServiceError::internal(e.to_string()))?;
 
-        Ok(AdiHandleResult::Success(json!(subgraph)))
+        Ok(AdiHandleResult::Success(json_to_bytes(json!(subgraph))))
     }
 
     async fn handle_add(&self, params: JsonValue) -> Result<AdiHandleResult, AdiServiceError> {
@@ -125,7 +130,7 @@ impl KnowledgebaseService {
 
         self.broadcast_event("node_added", json!({ "id": node.id, "title": node.title }));
 
-        Ok(AdiHandleResult::Success(json!(node)))
+        Ok(AdiHandleResult::Success(json_to_bytes(json!(node))))
     }
 
     async fn handle_get(&self, params: JsonValue) -> Result<AdiHandleResult, AdiServiceError> {
@@ -141,7 +146,7 @@ impl KnowledgebaseService {
             .map_err(|e| AdiServiceError::internal(e.to_string()))?
             .ok_or_else(|| AdiServiceError::not_found(format!("Node {} not found", id)))?;
 
-        Ok(AdiHandleResult::Success(json!(node)))
+        Ok(AdiHandleResult::Success(json_to_bytes(json!(node))))
     }
 
     async fn handle_delete(&self, params: JsonValue) -> Result<AdiHandleResult, AdiServiceError> {
@@ -157,7 +162,7 @@ impl KnowledgebaseService {
 
         self.broadcast_event("node_deleted", json!({ "id": id.to_string() }));
 
-        Ok(AdiHandleResult::Success(json!({ "deleted": true })))
+        Ok(AdiHandleResult::Success(json_to_bytes(json!({ "deleted": true }))))
     }
 
     async fn handle_approve(&self, params: JsonValue) -> Result<AdiHandleResult, AdiServiceError> {
@@ -173,7 +178,7 @@ impl KnowledgebaseService {
 
         self.broadcast_event("node_approved", json!({ "id": id.to_string() }));
 
-        Ok(AdiHandleResult::Success(json!({ "approved": true })))
+        Ok(AdiHandleResult::Success(json_to_bytes(json!({ "approved": true }))))
     }
 
     async fn handle_conflicts(
@@ -190,7 +195,7 @@ impl KnowledgebaseService {
             .map(|(a, b)| json!({ "node_a": a, "node_b": b }))
             .collect();
 
-        Ok(AdiHandleResult::Success(json!(pairs)))
+        Ok(AdiHandleResult::Success(json_to_bytes(json!(pairs))))
     }
 
     async fn handle_orphans(
@@ -202,7 +207,7 @@ impl KnowledgebaseService {
             .get_orphans()
             .map_err(|e| AdiServiceError::internal(e.to_string()))?;
 
-        Ok(AdiHandleResult::Success(json!(orphans)))
+        Ok(AdiHandleResult::Success(json_to_bytes(json!(orphans))))
     }
 
     async fn handle_link(&self, params: JsonValue) -> Result<AdiHandleResult, AdiServiceError> {
@@ -233,7 +238,7 @@ impl KnowledgebaseService {
 
         self.broadcast_event("edge_added", json!({ "id": edge.id, "from_id": from_id.to_string(), "to_id": to_id.to_string() }));
 
-        Ok(AdiHandleResult::Success(json!(edge)))
+        Ok(AdiHandleResult::Success(json_to_bytes(json!(edge))))
     }
 
     async fn handle_status(
@@ -244,11 +249,11 @@ impl KnowledgebaseService {
         let data_dir = kb.data_dir().to_string_lossy().to_string();
         let embedding_count = kb.storage().embedding.count();
 
-        Ok(AdiHandleResult::Success(json!({
+        Ok(AdiHandleResult::Success(json_to_bytes(json!({
             "initialized": true,
             "data_dir": data_dir,
             "embedding_count": embedding_count,
-        })))
+        }))))
     }
 }
 
@@ -539,8 +544,10 @@ impl AdiService for KnowledgebaseService {
         &self,
         _ctx: &AdiCallerContext,
         method: &str,
-        params: JsonValue,
+        payload: Bytes,
     ) -> Result<AdiHandleResult, AdiServiceError> {
+        let params: JsonValue = serde_json::from_slice(&payload)
+            .map_err(|e| AdiServiceError::invalid_params(e.to_string()))?;
         match method {
             "query" => self.handle_query(params).await,
             "subgraph" => self.handle_subgraph(params).await,

@@ -1,14 +1,13 @@
-use crate::adi_router::{AdiCallerContext, AdiHandleResult, AdiService, AdiServiceError};
-use crate::protocol::types::{AdiMethodInfo, AdiPluginCapabilities};
-use async_trait::async_trait;
+include!(concat!(env!("OUT_DIR"), "/credentials_adi_service.rs"));
+
 use credentials_core::{
-    Config, CredentialRow, CredentialType, Database, SecretManager,
+    Config, Credential, CredentialAccessLog, CredentialRow, CredentialType, CredentialWithData,
+    Database, DeleteResult, SecretManager, VerifyResult,
 };
-use serde_json::{json, Value as JsonValue};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-/// Credentials service for ADI router
+/// Credentials service for ADI router.
 ///
 /// Provides secure credential storage and retrieval over WebRTC.
 pub struct CredentialsService {
@@ -17,7 +16,7 @@ pub struct CredentialsService {
 }
 
 impl CredentialsService {
-    /// Initialize from environment configuration
+    /// Initialize from environment configuration.
     pub async fn from_env() -> Result<Self, String> {
         let config = Config::from_env().map_err(|e| format!("Config error: {e}"))?;
 
@@ -34,40 +33,51 @@ impl CredentialsService {
         })
     }
 
-    fn parse_uuid(params: &JsonValue, field: &str) -> Result<Uuid, AdiServiceError> {
-        params
-            .get(field)
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse::<Uuid>().ok())
-            .ok_or_else(|| AdiServiceError::invalid_params(format!("{field} is required (UUID)")))
+    fn parse_user_id(ctx: &AdiCallerContext) -> Result<Uuid, AdiServiceError> {
+        ctx.require_user_id()?
+            .parse()
+            .map_err(|_| AdiServiceError::internal("Invalid user_id format"))
     }
 
-    fn parse_credential_type(s: &str) -> Result<CredentialType, AdiServiceError> {
-        match s {
-            "github_token" => Ok(CredentialType::GithubToken),
-            "gitlab_token" => Ok(CredentialType::GitlabToken),
-            "api_key" => Ok(CredentialType::ApiKey),
-            "oauth2" => Ok(CredentialType::Oauth2),
-            "ssh_key" => Ok(CredentialType::SshKey),
-            "password" => Ok(CredentialType::Password),
-            "certificate" => Ok(CredentialType::Certificate),
-            "custom" => Ok(CredentialType::Custom),
-            other => Err(AdiServiceError::invalid_params(format!(
-                "Unknown credential type: {other}"
-            ))),
-        }
+    async fn log_access(&self, credential_id: Uuid, user_id: Uuid, action: &str) {
+        let _ = sqlx::query(
+            "INSERT INTO credential_access_log (credential_id, user_id, action) VALUES ($1, $2, $3)",
+        )
+        .bind(credential_id)
+        .bind(user_id)
+        .bind(action)
+        .execute(self.db.pool())
+        .await;
     }
 
-    async fn handle_list(&self, ctx: &AdiCallerContext, params: JsonValue) -> Result<AdiHandleResult, AdiServiceError> {
-        let user_id: Uuid = ctx.require_user_id()?.parse().map_err(|_| AdiServiceError::internal("Invalid user_id format"))?;
-        let cred_type = params
-            .get("credential_type")
-            .and_then(|v| v.as_str())
-            .map(Self::parse_credential_type)
-            .transpose()?;
-        let provider = params.get("provider").and_then(|v| v.as_str());
+    fn row_to_credential(row: CredentialRow) -> Credential {
+        row.into()
+    }
 
-        let rows = match (cred_type, provider) {
+    async fn fetch_row(&self, id: Uuid, user_id: Uuid) -> Result<CredentialRow, AdiServiceError> {
+        sqlx::query_as::<_, CredentialRow>(
+            "SELECT * FROM credentials WHERE id = $1 AND user_id = $2",
+        )
+        .bind(id)
+        .bind(user_id)
+        .fetch_optional(self.db.pool())
+        .await
+        .map_err(|e| AdiServiceError::internal(e.to_string()))?
+        .ok_or_else(|| AdiServiceError::not_found("Credential not found"))
+    }
+}
+
+#[async_trait]
+impl CredentialsServiceHandler for CredentialsService {
+    async fn list(
+        &self,
+        ctx: &AdiCallerContext,
+        credential_type: Option<CredentialType>,
+        provider: Option<String>,
+    ) -> Result<Vec<Credential>, AdiServiceError> {
+        let user_id = Self::parse_user_id(ctx)?;
+
+        let rows = match (credential_type, provider.as_deref()) {
             (None, None) => {
                 sqlx::query_as::<_, CredentialRow>(
                     "SELECT * FROM credentials WHERE user_id = $1 ORDER BY created_at DESC",
@@ -107,50 +117,32 @@ impl CredentialsService {
         }
         .map_err(|e| AdiServiceError::internal(e.to_string()))?;
 
-        let credentials: Vec<JsonValue> = rows.into_iter().map(|r| row_to_json(&r)).collect();
-        Ok(AdiHandleResult::Success(json!(credentials)))
+        Ok(rows.into_iter().map(Self::row_to_credential).collect())
     }
 
-    async fn handle_get(&self, ctx: &AdiCallerContext, params: JsonValue) -> Result<AdiHandleResult, AdiServiceError> {
-        let user_id: Uuid = ctx.require_user_id()?.parse().map_err(|_| AdiServiceError::internal("Invalid user_id format"))?;
-        let id = Self::parse_uuid(&params, "id")?;
-
-        let row = sqlx::query_as::<_, CredentialRow>(
-            "SELECT * FROM credentials WHERE id = $1 AND user_id = $2",
-        )
-        .bind(id)
-        .bind(user_id)
-        .fetch_optional(self.db.pool())
-        .await
-        .map_err(|e| AdiServiceError::internal(e.to_string()))?
-        .ok_or_else(|| AdiServiceError::not_found("Credential not found"))?;
-
-        Ok(AdiHandleResult::Success(row_to_json(&row)))
-    }
-
-    async fn handle_get_with_data(
+    async fn get(
         &self,
         ctx: &AdiCallerContext,
-        params: JsonValue,
-    ) -> Result<AdiHandleResult, AdiServiceError> {
-        let user_id: Uuid = ctx.require_user_id()?.parse().map_err(|_| AdiServiceError::internal("Invalid user_id format"))?;
-        let id = Self::parse_uuid(&params, "id")?;
+        id: Uuid,
+    ) -> Result<Credential, AdiServiceError> {
+        let user_id = Self::parse_user_id(ctx)?;
+        let row = self.fetch_row(id, user_id).await?;
+        Ok(Self::row_to_credential(row))
+    }
 
-        let row = sqlx::query_as::<_, CredentialRow>(
-            "SELECT * FROM credentials WHERE id = $1 AND user_id = $2",
-        )
-        .bind(id)
-        .bind(user_id)
-        .fetch_optional(self.db.pool())
-        .await
-        .map_err(|e| AdiServiceError::internal(e.to_string()))?
-        .ok_or_else(|| AdiServiceError::not_found("Credential not found"))?;
+    async fn get_with_data(
+        &self,
+        ctx: &AdiCallerContext,
+        id: Uuid,
+    ) -> Result<CredentialWithData, AdiServiceError> {
+        let user_id = Self::parse_user_id(ctx)?;
+        let row = self.fetch_row(id, user_id).await?;
 
         let decrypted = self
             .secrets
             .decrypt(&row.encrypted_data)
             .map_err(|e| AdiServiceError::internal(e.to_string()))?;
-        let data: JsonValue = serde_json::from_str(&decrypted)
+        let data: serde_json::Value = serde_json::from_str(&decrypted)
             .map_err(|e| AdiServiceError::internal(format!("Failed to parse credential data: {e}")))?;
 
         sqlx::query("UPDATE credentials SET last_used_at = NOW() WHERE id = $1")
@@ -161,45 +153,42 @@ impl CredentialsService {
 
         self.log_access(id, user_id, "read").await;
 
-        let mut result = row_to_json(&row);
-        result["data"] = data;
-        Ok(AdiHandleResult::Success(result))
+        Ok(CredentialWithData {
+            credential: Self::row_to_credential(row),
+            data,
+        })
     }
 
-    async fn handle_create(&self, ctx: &AdiCallerContext, params: JsonValue) -> Result<AdiHandleResult, AdiServiceError> {
-        let user_id: Uuid = ctx.require_user_id()?.parse().map_err(|_| AdiServiceError::internal("Invalid user_id format"))?;
+    async fn create(
+        &self,
+        ctx: &AdiCallerContext,
+        name: String,
+        credential_type: CredentialType,
+        data: std::collections::HashMap<String, serde_json::Value>,
+        description: Option<String>,
+        metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
+        provider: Option<String>,
+        expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<Credential, AdiServiceError> {
+        let user_id = Self::parse_user_id(ctx)?;
 
-        let name = params
-            .get("name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| AdiServiceError::invalid_params("name is required"))?
-            .trim();
-
+        let name = name.trim();
         if name.is_empty() {
             return Err(AdiServiceError::invalid_params("Name cannot be empty"));
         }
 
-        let credential_type = params
-            .get("credential_type")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| AdiServiceError::invalid_params("credential_type is required"))
-            .and_then(Self::parse_credential_type)?;
-
-        let data = params
-            .get("data")
-            .ok_or_else(|| AdiServiceError::invalid_params("data is required"))?;
-
-        let data_json = serde_json::to_string(data)
+        let data_json = serde_json::to_string(&data)
             .map_err(|e| AdiServiceError::invalid_params(format!("Invalid data: {e}")))?;
         let encrypted_data = self
             .secrets
             .encrypt(&data_json)
             .map_err(|e| AdiServiceError::internal(e.to_string()))?;
 
-        let metadata = params.get("metadata").cloned().unwrap_or(json!({}));
-        let description = params.get("description").and_then(|v| v.as_str());
-        let provider = params.get("provider").and_then(|v| v.as_str());
-        let expires_at = params.get("expires_at").and_then(|v| v.as_str());
+        let metadata_value = metadata
+            .map(|m| serde_json::to_value(m).unwrap_or_default())
+            .unwrap_or_else(|| serde_json::json!({}));
+
+        let expires_at_str = expires_at.map(|e| e.to_rfc3339());
 
         let row = sqlx::query_as::<_, CredentialRow>(
             r#"
@@ -210,12 +199,12 @@ impl CredentialsService {
         )
         .bind(user_id)
         .bind(name)
-        .bind(description)
+        .bind(description.as_deref())
         .bind(&credential_type)
         .bind(&encrypted_data)
-        .bind(&metadata)
-        .bind(provider)
-        .bind(expires_at)
+        .bind(&metadata_value)
+        .bind(provider.as_deref())
+        .bind(expires_at_str.as_deref())
         .fetch_one(self.db.pool())
         .await
         .map_err(|e| {
@@ -231,47 +220,39 @@ impl CredentialsService {
 
         self.log_access(row.id, user_id, "create").await;
 
-        Ok(AdiHandleResult::Success(row_to_json(&row)))
+        Ok(Self::row_to_credential(row))
     }
 
-    async fn handle_update(&self, ctx: &AdiCallerContext, params: JsonValue) -> Result<AdiHandleResult, AdiServiceError> {
-        let user_id: Uuid = ctx.require_user_id()?.parse().map_err(|_| AdiServiceError::internal("Invalid user_id format"))?;
-        let id = Self::parse_uuid(&params, "id")?;
+    async fn update(
+        &self,
+        ctx: &AdiCallerContext,
+        id: Uuid,
+        name: Option<String>,
+        description: Option<String>,
+        data: Option<std::collections::HashMap<String, serde_json::Value>>,
+        metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
+        provider: Option<String>,
+        expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<Credential, AdiServiceError> {
+        let user_id = Self::parse_user_id(ctx)?;
+        let existing = self.fetch_row(id, user_id).await?;
 
-        let existing = sqlx::query_as::<_, CredentialRow>(
-            "SELECT * FROM credentials WHERE id = $1 AND user_id = $2",
-        )
-        .bind(id)
-        .bind(user_id)
-        .fetch_optional(self.db.pool())
-        .await
-        .map_err(|e| AdiServiceError::internal(e.to_string()))?
-        .ok_or_else(|| AdiServiceError::not_found("Credential not found"))?;
-
-        let name = params
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&existing.name);
-        let description = params
-            .get("description")
-            .and_then(|v| v.as_str())
+        let final_name = name.as_deref().unwrap_or(&existing.name);
+        let final_description = description
+            .as_deref()
             .or(existing.description.as_deref());
-        let metadata = params
-            .get("metadata")
-            .cloned()
+        let final_metadata = metadata
+            .map(|m| serde_json::to_value(m).unwrap_or_default())
             .unwrap_or(existing.metadata);
-        let provider = params
-            .get("provider")
-            .and_then(|v| v.as_str())
+        let final_provider = provider
+            .as_deref()
             .or(existing.provider.as_deref());
-        let expires_at = params
-            .get("expires_at")
-            .and_then(|v| v.as_str())
-            .map(String::from)
+        let final_expires_at = expires_at
+            .map(|e| e.to_rfc3339())
             .or_else(|| existing.expires_at.map(|e| e.to_rfc3339()));
 
-        let encrypted_data = if let Some(new_data) = params.get("data") {
-            let data_json = serde_json::to_string(new_data)
+        let encrypted_data = if let Some(new_data) = data {
+            let data_json = serde_json::to_string(&new_data)
                 .map_err(|e| AdiServiceError::invalid_params(format!("Invalid data: {e}")))?;
             self.secrets
                 .encrypt(&data_json)
@@ -289,12 +270,12 @@ impl CredentialsService {
             RETURNING *
             "#,
         )
-        .bind(name)
-        .bind(description)
+        .bind(final_name)
+        .bind(final_description)
         .bind(&encrypted_data)
-        .bind(&metadata)
-        .bind(provider)
-        .bind(expires_at.as_deref())
+        .bind(&final_metadata)
+        .bind(final_provider)
+        .bind(final_expires_at.as_deref())
         .bind(id)
         .bind(user_id)
         .fetch_one(self.db.pool())
@@ -303,12 +284,15 @@ impl CredentialsService {
 
         self.log_access(id, user_id, "update").await;
 
-        Ok(AdiHandleResult::Success(row_to_json(&row)))
+        Ok(Self::row_to_credential(row))
     }
 
-    async fn handle_delete(&self, ctx: &AdiCallerContext, params: JsonValue) -> Result<AdiHandleResult, AdiServiceError> {
-        let user_id: Uuid = ctx.require_user_id()?.parse().map_err(|_| AdiServiceError::internal("Invalid user_id format"))?;
-        let id = Self::parse_uuid(&params, "id")?;
+    async fn delete(
+        &self,
+        ctx: &AdiCallerContext,
+        id: Uuid,
+    ) -> Result<DeleteResult, AdiServiceError> {
+        let user_id = Self::parse_user_id(ctx)?;
 
         self.log_access(id, user_id, "delete").await;
 
@@ -324,55 +308,40 @@ impl CredentialsService {
             return Err(AdiServiceError::not_found("Credential not found"));
         }
 
-        Ok(AdiHandleResult::Success(json!({ "deleted": true })))
+        Ok(DeleteResult { deleted: true })
     }
 
-    async fn handle_verify(&self, ctx: &AdiCallerContext, params: JsonValue) -> Result<AdiHandleResult, AdiServiceError> {
-        let user_id: Uuid = ctx.require_user_id()?.parse().map_err(|_| AdiServiceError::internal("Invalid user_id format"))?;
-        let id = Self::parse_uuid(&params, "id")?;
-
-        let row = sqlx::query_as::<_, CredentialRow>(
-            "SELECT * FROM credentials WHERE id = $1 AND user_id = $2",
-        )
-        .bind(id)
-        .bind(user_id)
-        .fetch_optional(self.db.pool())
-        .await
-        .map_err(|e| AdiServiceError::internal(e.to_string()))?
-        .ok_or_else(|| AdiServiceError::not_found("Credential not found"))?;
+    async fn verify(
+        &self,
+        ctx: &AdiCallerContext,
+        id: Uuid,
+    ) -> Result<VerifyResult, AdiServiceError> {
+        let user_id = Self::parse_user_id(ctx)?;
+        let row = self.fetch_row(id, user_id).await?;
 
         let is_expired = row
             .expires_at
             .map(|exp| exp < chrono::Utc::now())
             .unwrap_or(false);
 
-        Ok(AdiHandleResult::Success(json!({
-            "valid": !is_expired,
-            "is_expired": is_expired,
-            "expires_at": row.expires_at,
-        })))
+        Ok(VerifyResult {
+            valid: !is_expired,
+            is_expired,
+            expires_at: row.expires_at,
+        })
     }
 
-    async fn handle_access_logs(
+    async fn access_logs(
         &self,
         ctx: &AdiCallerContext,
-        params: JsonValue,
-    ) -> Result<AdiHandleResult, AdiServiceError> {
-        let user_id: Uuid = ctx.require_user_id()?.parse().map_err(|_| AdiServiceError::internal("Invalid user_id format"))?;
-        let id = Self::parse_uuid(&params, "id")?;
+        id: Uuid,
+    ) -> Result<Vec<CredentialAccessLog>, AdiServiceError> {
+        let user_id = Self::parse_user_id(ctx)?;
 
         // Verify ownership
-        sqlx::query_as::<_, CredentialRow>(
-            "SELECT * FROM credentials WHERE id = $1 AND user_id = $2",
-        )
-        .bind(id)
-        .bind(user_id)
-        .fetch_optional(self.db.pool())
-        .await
-        .map_err(|e| AdiServiceError::internal(e.to_string()))?
-        .ok_or_else(|| AdiServiceError::not_found("Credential not found"))?;
+        self.fetch_row(id, user_id).await?;
 
-        let logs = sqlx::query_as::<_, credentials_core::CredentialAccessLog>(
+        let logs = sqlx::query_as::<_, CredentialAccessLog>(
             r#"
             SELECT id, credential_id, user_id, action,
                    host(ip_address)::text as ip_address, user_agent, details, created_at
@@ -387,229 +356,6 @@ impl CredentialsService {
         .await
         .map_err(|e| AdiServiceError::internal(e.to_string()))?;
 
-        Ok(AdiHandleResult::Success(json!(logs)))
-    }
-
-    async fn log_access(&self, credential_id: Uuid, user_id: Uuid, action: &str) {
-        let _ = sqlx::query(
-            "INSERT INTO credential_access_log (credential_id, user_id, action) VALUES ($1, $2, $3)",
-        )
-        .bind(credential_id)
-        .bind(user_id)
-        .bind(action)
-        .execute(self.db.pool())
-        .await;
-    }
-}
-
-fn row_to_json(row: &CredentialRow) -> JsonValue {
-    json!({
-        "id": row.id,
-        "name": row.name,
-        "description": row.description,
-        "credential_type": row.credential_type,
-        "metadata": row.metadata,
-        "provider": row.provider,
-        "expires_at": row.expires_at,
-        "created_at": row.created_at,
-        "updated_at": row.updated_at,
-        "last_used_at": row.last_used_at,
-    })
-}
-
-#[async_trait]
-impl AdiService for CredentialsService {
-    fn plugin_id(&self) -> &str {
-        "adi.credentials"
-    }
-
-    fn name(&self) -> &str {
-        "Credentials"
-    }
-
-    fn version(&self) -> &str {
-        env!("CARGO_PKG_VERSION")
-    }
-
-    fn description(&self) -> Option<&str> {
-        Some("Secure credential storage with encryption, audit logging, and expiry verification")
-    }
-
-    fn capabilities(&self) -> AdiPluginCapabilities {
-        AdiPluginCapabilities {
-            subscriptions: false,
-            notifications: false,
-            streaming: false,
-        }
-    }
-
-    fn methods(&self) -> Vec<AdiMethodInfo> {
-        vec![
-            AdiMethodInfo {
-                name: "list".to_string(),
-                description: "List credentials, optionally filtered by type/provider".to_string(),
-                streaming: false,
-                params_schema: Some(json!({
-                    "type": "object",
-                    "properties": {
-                        "credential_type": {
-                            "type": "string",
-                            "enum": ["github_token", "gitlab_token", "api_key", "oauth2", "ssh_key", "password", "certificate", "custom"]
-                        },
-                        "provider": { "type": "string" }
-                    }
-                })),
-                result_schema: Some(json!({
-                    "type": "array",
-                    "items": { "$ref": "#/definitions/Credential" }
-                })),
-                ..Default::default()
-            },
-            AdiMethodInfo {
-                name: "get".to_string(),
-                description: "Get credential metadata (without decrypted data)".to_string(),
-                streaming: false,
-                params_schema: Some(json!({
-                    "type": "object",
-                    "required": ["id"],
-                    "properties": {
-                        "id": { "type": "string", "format": "uuid" }
-                    }
-                })),
-                result_schema: Some(json!({ "$ref": "#/definitions/Credential" })),
-                ..Default::default()
-            },
-            AdiMethodInfo {
-                name: "get_with_data".to_string(),
-                description: "Get credential with decrypted sensitive data".to_string(),
-                streaming: false,
-                params_schema: Some(json!({
-                    "type": "object",
-                    "required": ["id"],
-                    "properties": {
-                        "id": { "type": "string", "format": "uuid" }
-                    }
-                })),
-                result_schema: Some(json!({ "$ref": "#/definitions/CredentialWithData" })),
-                ..Default::default()
-            },
-            AdiMethodInfo {
-                name: "create".to_string(),
-                description: "Create a new credential".to_string(),
-                streaming: false,
-                params_schema: Some(json!({
-                    "type": "object",
-                    "required": ["name", "credential_type", "data"],
-                    "properties": {
-                        "name": { "type": "string" },
-                        "description": { "type": "string" },
-                        "credential_type": {
-                            "type": "string",
-                            "enum": ["github_token", "gitlab_token", "api_key", "oauth2", "ssh_key", "password", "certificate", "custom"]
-                        },
-                        "data": { "type": "object", "description": "Sensitive credential data (will be encrypted)" },
-                        "metadata": { "type": "object" },
-                        "provider": { "type": "string" },
-                        "expires_at": { "type": "string", "format": "date-time" }
-                    }
-                })),
-                result_schema: Some(json!({ "$ref": "#/definitions/Credential" })),
-                ..Default::default()
-            },
-            AdiMethodInfo {
-                name: "update".to_string(),
-                description: "Update a credential (partial update)".to_string(),
-                streaming: false,
-                params_schema: Some(json!({
-                    "type": "object",
-                    "required": ["id"],
-                    "properties": {
-                        "id": { "type": "string", "format": "uuid" },
-                        "name": { "type": "string" },
-                        "description": { "type": "string" },
-                        "data": { "type": "object" },
-                        "metadata": { "type": "object" },
-                        "provider": { "type": "string" },
-                        "expires_at": { "type": "string", "format": "date-time" }
-                    }
-                })),
-                result_schema: Some(json!({ "$ref": "#/definitions/Credential" })),
-                ..Default::default()
-            },
-            AdiMethodInfo {
-                name: "delete".to_string(),
-                description: "Delete a credential".to_string(),
-                streaming: false,
-                params_schema: Some(json!({
-                    "type": "object",
-                    "required": ["id"],
-                    "properties": {
-                        "id": { "type": "string", "format": "uuid" }
-                    }
-                })),
-                result_schema: Some(json!({
-                    "type": "object",
-                    "properties": { "deleted": { "type": "boolean" } }
-                })),
-                ..Default::default()
-            },
-            AdiMethodInfo {
-                name: "verify".to_string(),
-                description: "Verify credential validity (check expiration)".to_string(),
-                streaming: false,
-                params_schema: Some(json!({
-                    "type": "object",
-                    "required": ["id"],
-                    "properties": {
-                        "id": { "type": "string", "format": "uuid" }
-                    }
-                })),
-                result_schema: Some(json!({
-                    "type": "object",
-                    "properties": {
-                        "valid": { "type": "boolean" },
-                        "is_expired": { "type": "boolean" },
-                        "expires_at": { "type": ["string", "null"], "format": "date-time" }
-                    }
-                })),
-                ..Default::default()
-            },
-            AdiMethodInfo {
-                name: "access_logs".to_string(),
-                description: "Get access audit logs for a credential".to_string(),
-                streaming: false,
-                params_schema: Some(json!({
-                    "type": "object",
-                    "required": ["id"],
-                    "properties": {
-                        "id": { "type": "string", "format": "uuid" }
-                    }
-                })),
-                result_schema: Some(json!({
-                    "type": "array",
-                    "items": { "$ref": "#/definitions/CredentialAccessLog" }
-                })),
-                ..Default::default()
-            },
-        ]
-    }
-
-    async fn handle(
-        &self,
-        ctx: &AdiCallerContext,
-        method: &str,
-        params: JsonValue,
-    ) -> Result<AdiHandleResult, AdiServiceError> {
-        match method {
-            "list" => self.handle_list(ctx, params).await,
-            "get" => self.handle_get(ctx, params).await,
-            "get_with_data" => self.handle_get_with_data(ctx, params).await,
-            "create" => self.handle_create(ctx, params).await,
-            "update" => self.handle_update(ctx, params).await,
-            "delete" => self.handle_delete(ctx, params).await,
-            "verify" => self.handle_verify(ctx, params).await,
-            "access_logs" => self.handle_access_logs(ctx, params).await,
-            _ => Err(AdiServiceError::method_not_found(method)),
-        }
+        Ok(logs)
     }
 }

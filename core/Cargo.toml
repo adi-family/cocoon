@@ -43,9 +43,10 @@ anyhow = "1"
 # ADI services (optional)
 tasks-core = { path = "../../tasks/core", optional = true }
 kb-core = { package = "knowledgebase-core", path = "../../knowledgebase/core", features = ["fastembed"], optional = true }
-credentials-core = { path = "../../credentials/core", optional = true }
+credentials-core = { path = "../../../plugins/adi.credentials/core", optional = true }
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "json"], optional = true }
 
+bytes = "1"
 base64 = "0.22"
 walkdir = "2"
 futures = "0.3"

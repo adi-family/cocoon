@@ -16,7 +16,8 @@
 //!
 //! If no ICE servers are configured, defaults to Google's public STUN server.
 
-use crate::adi_router::{AdiCallerContext, AdiDiscovery, AdiRequest, AdiResponse, AdiRouter, AdiRouterResult};
+use crate::adi_frame;
+use crate::adi_router::{AdiCallerContext, AdiDiscovery, AdiRouter, AdiRouterBinaryResult};
 use crate::filesystem::{FileSystemRequest, handle_request as handle_fs_request};
 use crate::protocol::messages::CocoonMessage;
 use crate::protocol::types::SilkStream;
@@ -443,6 +444,59 @@ impl WebRtcManager {
                             session_id, channel, msg.data.len(), msg.is_string
                         );
 
+                        // Handle binary frames on "adi" channel (service requests)
+                        if channel == "adi" && !msg.is_string {
+                            if let Some(router) = &adi_router {
+                                tracing::debug!("📦 ADI binary request received: {} bytes", msg.data.len());
+
+                                let ctx = AdiCallerContext {
+                                    user_id: user_id.clone(),
+                                    device_id: None,
+                                };
+
+                                let router_guard = router.lock().await;
+                                let result = router_guard.handle_binary(&ctx, &msg.data).await;
+                                drop(router_guard);
+
+                                match result {
+                                    AdiRouterBinaryResult::Single(response_bytes) => {
+                                        let len = response_bytes.len();
+                                        if let Err(e) = dc_for_response.send(&response_bytes.into()).await {
+                                            tracing::error!("❌ Failed to send ADI binary response: {}", e);
+                                        } else {
+                                            tracing::debug!("📤 ADI binary response sent: {} bytes", len);
+                                        }
+                                    }
+                                    AdiRouterBinaryResult::Stream { request_id, mut receiver } => {
+                                        let dc_for_stream = dc_for_response.clone();
+                                        tokio::spawn(async move {
+                                            let mut seq = 0u32;
+                                            while let Some((chunk_data, is_final)) = receiver.recv().await {
+                                                let frame = if is_final {
+                                                    adi_frame::stream_end(request_id, seq, &chunk_data)
+                                                } else {
+                                                    adi_frame::stream_chunk(request_id, seq, &chunk_data)
+                                                };
+                                                seq += 1;
+
+                                                if let Err(e) = dc_for_stream.send(&frame.into()).await {
+                                                    tracing::error!("❌ Failed to send ADI stream chunk: {}", e);
+                                                    break;
+                                                }
+
+                                                if is_final {
+                                                    break;
+                                                }
+                                            }
+                                        });
+                                    }
+                                }
+                            } else {
+                                tracing::warn!("⚠️ ADI binary request received but no router configured");
+                            }
+                            return;
+                        }
+
                         let (data, binary) = if msg.is_string {
                             (String::from_utf8_lossy(&msg.data).to_string(), false)
                         } else {
@@ -525,18 +579,10 @@ impl WebRtcManager {
                             }
                         }
 
-                        // Handle "adi" channel for ADI service requests
+                        // Handle "adi" channel text frames (discovery + subscriptions)
                         if channel == "adi" {
                             if let Some(router) = &adi_router {
-                                tracing::debug!("📦 ADI request received: {} bytes", data.len());
-
-                                // Build caller context from per-connection user_id
-                                let ctx = AdiCallerContext {
-                                    user_id: user_id.clone(),
-                                    device_id: None,
-                                };
-
-                                // Try to parse as discovery request first
+                                // Try to parse as discovery request
                                 if let Ok(discovery) = serde_json::from_str::<AdiDiscovery>(&data) {
                                     let router_guard = router.lock().await;
                                     let response = router_guard.handle_discovery(discovery);
@@ -550,70 +596,10 @@ impl WebRtcManager {
                                     return;
                                 }
 
-                                // Parse as service request
-                                match serde_json::from_str::<AdiRequest>(&data) {
-                                    Ok(request) => {
-                                        let router_guard = router.lock().await;
-                                        let result = router_guard.handle(&ctx, request).await;
-                                        drop(router_guard);
-                                        
-                                        match result {
-                                            AdiRouterResult::Single(response) => {
-                                                if let Ok(response_json) = serde_json::to_string(&response) {
-                                                    let response_len = response_json.len();
-                                                    if let Err(e) = dc_for_response.send(&response_json.into_bytes().into()).await {
-                                                        tracing::error!("❌ Failed to send ADI response: {}", e);
-                                                    } else {
-                                                        tracing::debug!("📤 ADI response sent: {} bytes", response_len);
-                                                    }
-                                                }
-                                            }
-                                            AdiRouterResult::Stream { request_id, plugin, method, mut receiver } => {
-                                                // Handle streaming response
-                                                let dc_for_stream = dc_for_response.clone();
-                                                tokio::spawn(async move {
-                                                    let mut seq = 0u32;
-                                                    while let Some((chunk_data, done)) = receiver.recv().await {
-                                                        let response = AdiResponse::Stream {
-                                                            request_id,
-                                                            plugin: plugin.clone(),
-                                                            method: method.clone(),
-                                                            data: chunk_data,
-                                                            seq,
-                                                            done,
-                                                        };
-                                                        seq += 1;
-                                                        
-                                                        if let Ok(response_json) = serde_json::to_string(&response) {
-                                                            if let Err(e) = dc_for_stream.send(&response_json.into_bytes().into()).await {
-                                                                tracing::error!("❌ Failed to send ADI stream chunk: {}", e);
-                                                                break;
-                                                            }
-                                                        }
-                                                        
-                                                        if done {
-                                                            break;
-                                                        }
-                                                    }
-                                                });
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("⚠️ Invalid ADI request: {}", e);
-                                        let error_response = serde_json::json!({
-                                            "type": "error",
-                                            "request_id": null,
-                                            "plugin": "",
-                                            "method": "",
-                                            "code": "invalid_request",
-                                            "message": format!("Failed to parse request: {}", e)
-                                        });
-                                        if let Ok(error_json) = serde_json::to_string(&error_response) {
-                                            let _ = dc_for_response.send(&error_json.into_bytes().into()).await;
-                                        }
-                                    }
-                                }
+                                // Text frames on "adi" that aren't discovery are ignored
+                                // (all service requests use binary framing now)
+                                tracing::warn!("⚠️ Unrecognized text message on adi channel: {}",
+                                    &data[..data.len().min(200)]);
                             } else {
                                 tracing::warn!("⚠️ ADI request received but no router configured");
                                 let error_response = serde_json::json!({

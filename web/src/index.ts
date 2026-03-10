@@ -8,6 +8,7 @@ export * from './silk-types';
 export * from './silk-command';
 export * from './silk-session';
 export * from './cocoon-client';
+export * from './adi-frame';
 
 import type { CocoonPlugin } from './plugin';
 export { CocoonPlugin, CocoonPlugin as PluginShell } from './plugin';

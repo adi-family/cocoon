@@ -2,10 +2,6 @@ pub mod protocol {
     include!(concat!(env!("OUT_DIR"), "/generated_protocol.rs"));
 }
 
-#[cfg(feature = "credentials-service")]
-pub mod credentials_generated {
-    include!(concat!(env!("OUT_DIR"), "/generated_credentials.rs"));
-}
 
 impl Default for protocol::types::AdiMethodInfo {
     fn default() -> Self {
@@ -31,6 +27,7 @@ impl Default for protocol::types::AdiPluginCapabilities {
     }
 }
 
+pub mod adi_frame;
 pub mod adi_router;
 mod core;
 pub mod filesystem;
@@ -43,7 +40,8 @@ pub mod silk;
 pub mod webrtc;
 
 pub use adi_router::{
-    create_stream_channel, AdiHandleResult, AdiRouter, AdiService, AdiServiceError, StreamSender,
+    create_stream_channel, AdiCallerContext, AdiHandleResult, AdiRouter, AdiService,
+    AdiServiceError, StreamSender,
 };
 pub use core::run;
 pub use runtime::{CocoonInfo, CocoonStatus, Runtime, RuntimeManager, RuntimeType};

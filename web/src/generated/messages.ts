@@ -23,12 +23,6 @@ export type SignalingMessage =
   | { type: 'silk_error'; session_id?: string; command_id?: string; code: string; message: string }
 
   // ── adi ──
-  | { type: 'adi_request'; request_id: string; plugin: string; method: string; params: unknown }
-  | { type: 'adi_success'; request_id: string; plugin: string; method: string; data: unknown }
-  | { type: 'adi_request_error'; request_id: string; plugin: string; method: string; code: string; message: string }
-  | { type: 'adi_plugin_not_found'; request_id: string; plugin: string }
-  | { type: 'adi_method_not_found'; request_id: string; plugin: string; method: string; available_methods: string[] }
-  | { type: 'adi_stream_chunk'; request_id: string; plugin: string; method: string; data: unknown; done: boolean }
   | { type: 'adi_list_plugins'; request_id: string }
   | { type: 'adi_plugins_list'; request_id: string; plugins: AdiPluginInfo[] }
   | { type: 'adi_plugins_changed'; added: string[]; removed: string[]; updated: string[] }

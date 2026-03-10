@@ -108,28 +108,12 @@ interface Silk {
 }
 
 // ── ADI Plugin Channel ──────────────────────────────────────
+// Plugin request/response uses binary framing: [u32 BE header_len][JSON header][payload bytes]
+// See adi_frame.rs / adi-frame.ts for the binary protocol.
+// Only discovery and subscription messages below travel as JSON text on this channel.
 
 @channel("adi")
 interface Adi {
-    // Request/Response
-    @event
-    request(request_id: string, plugin: string, method: string, params: unknown): void;
-
-    @event
-    success(request_id: string, plugin: string, method: string, data: unknown): void;
-
-    @event
-    requestError(request_id: string, plugin: string, method: string, code: string, message: string): void;
-
-    @event
-    pluginNotFound(request_id: string, plugin: string): void;
-
-    @event
-    methodNotFound(request_id: string, plugin: string, method: string, available_methods: string[]): void;
-
-    @event
-    streamChunk(request_id: string, plugin: string, method: string, data: unknown, done: boolean): void;
-
     // Discovery
     @event
     listPlugins(request_id: string): void;

@@ -22,7 +22,7 @@ pub use tasks::TasksService;
 pub use knowledgebase::KnowledgebaseService;
 
 #[cfg(feature = "credentials-core")]
-pub use credentials::CredentialsService;
+pub use credentials::{CredentialsService, CredentialsServiceAdi};
 
 pub use tools::{
     FileSystemToolProvider, McpServerProvider, ShellToolProvider, ToolCategory, ToolContentType,
