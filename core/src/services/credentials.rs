@@ -2,7 +2,7 @@ include!(concat!(env!("OUT_DIR"), "/credentials_adi_service.rs"));
 
 use credentials_core::{
     Config, Credential, CredentialAccessLog, CredentialRow, CredentialType, CredentialWithData,
-    Database, DeleteResult, SecretManager, VerifyResult,
+    DeleteResult, SecretManager, VerifyResult,
 };
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -11,7 +11,7 @@ use uuid::Uuid;
 ///
 /// Provides secure credential storage and retrieval over WebRTC.
 pub struct CredentialsService {
-    db: Database,
+    db: PgPool,
     secrets: SecretManager,
 }
 
@@ -28,7 +28,7 @@ impl CredentialsService {
             SecretManager::from_hex(&config.encryption_key).map_err(|e| format!("{e}"))?;
 
         Ok(Self {
-            db: Database::new(pool),
+            db: pool,
             secrets,
         })
     }
@@ -46,7 +46,7 @@ impl CredentialsService {
         .bind(credential_id)
         .bind(user_id)
         .bind(action)
-        .execute(self.db.pool())
+        .execute(&self.db)
         .await;
     }
 
@@ -60,7 +60,7 @@ impl CredentialsService {
         )
         .bind(id)
         .bind(user_id)
-        .fetch_optional(self.db.pool())
+        .fetch_optional(&self.db)
         .await
         .map_err(|e| AdiServiceError::internal(e.to_string()))?
         .ok_or_else(|| AdiServiceError::not_found("Credential not found"))
@@ -83,7 +83,7 @@ impl CredentialsServiceHandler for CredentialsService {
                     "SELECT * FROM credentials WHERE user_id = $1 ORDER BY created_at DESC",
                 )
                 .bind(user_id)
-                .fetch_all(self.db.pool())
+                .fetch_all(&self.db)
                 .await
             }
             (Some(ct), None) => {
@@ -92,7 +92,7 @@ impl CredentialsServiceHandler for CredentialsService {
                 )
                 .bind(user_id)
                 .bind(ct)
-                .fetch_all(self.db.pool())
+                .fetch_all(&self.db)
                 .await
             }
             (None, Some(prov)) => {
@@ -101,7 +101,7 @@ impl CredentialsServiceHandler for CredentialsService {
                 )
                 .bind(user_id)
                 .bind(prov)
-                .fetch_all(self.db.pool())
+                .fetch_all(&self.db)
                 .await
             }
             (Some(ct), Some(prov)) => {
@@ -111,7 +111,7 @@ impl CredentialsServiceHandler for CredentialsService {
                 .bind(user_id)
                 .bind(ct)
                 .bind(prov)
-                .fetch_all(self.db.pool())
+                .fetch_all(&self.db)
                 .await
             }
         }
@@ -147,7 +147,7 @@ impl CredentialsServiceHandler for CredentialsService {
 
         sqlx::query("UPDATE credentials SET last_used_at = NOW() WHERE id = $1")
             .bind(id)
-            .execute(self.db.pool())
+            .execute(&self.db)
             .await
             .map_err(|e| AdiServiceError::internal(e.to_string()))?;
 
@@ -205,7 +205,7 @@ impl CredentialsServiceHandler for CredentialsService {
         .bind(&metadata_value)
         .bind(provider.as_deref())
         .bind(expires_at_str.as_deref())
-        .fetch_one(self.db.pool())
+        .fetch_one(&self.db)
         .await
         .map_err(|e| {
             if let sqlx::Error::Database(ref db_err) = e {
@@ -278,7 +278,7 @@ impl CredentialsServiceHandler for CredentialsService {
         .bind(final_expires_at.as_deref())
         .bind(id)
         .bind(user_id)
-        .fetch_one(self.db.pool())
+        .fetch_one(&self.db)
         .await
         .map_err(|e| AdiServiceError::internal(e.to_string()))?;
 
@@ -300,7 +300,7 @@ impl CredentialsServiceHandler for CredentialsService {
             sqlx::query("DELETE FROM credentials WHERE id = $1 AND user_id = $2")
                 .bind(id)
                 .bind(user_id)
-                .execute(self.db.pool())
+                .execute(&self.db)
                 .await
                 .map_err(|e| AdiServiceError::internal(e.to_string()))?;
 
@@ -352,7 +352,7 @@ impl CredentialsServiceHandler for CredentialsService {
             "#,
         )
         .bind(id)
-        .fetch_all(self.db.pool())
+        .fetch_all(&self.db)
         .await
         .map_err(|e| AdiServiceError::internal(e.to_string()))?;
 
