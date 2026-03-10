@@ -28,7 +28,7 @@ type StreamPending = {
 /** Implements Connection interface over a CocoonWebRTC data channel. */
 export class CocoonConnection implements Connection {
   readonly id: string;
-  services: string[] = [];
+  plugins: string[] = [];
 
   private readonly pending = new Map<string, Pending>();
   private readonly streams = new Map<string, StreamPending>();
@@ -42,7 +42,7 @@ export class CocoonConnection implements Connection {
     this.unsub = webrtc.onAdiMessage((msg) => this.handleMessage(msg));
   }
 
-  async request<T>(service: string, method: string, params?: unknown): Promise<T> {
+  async request<T>(plugin: string, method: string, params?: unknown): Promise<T> {
     await this.webrtc.connect();
     const requestId = genId();
     return new Promise<T>((resolve, reject) => {
@@ -53,14 +53,14 @@ export class CocoonConnection implements Connection {
       this.webrtc.sendAdi({
         type: 'adi_request',
         request_id: requestId,
-        service,
+        plugin,
         method,
         params: params ?? {},
       });
     });
   }
 
-  async *stream<T>(service: string, method: string, params?: unknown): AsyncGenerator<T> {
+  async *stream<T>(plugin: string, method: string, params?: unknown): AsyncGenerator<T> {
     await this.webrtc.connect();
     const requestId = genId();
     const buffer: unknown[] = [];
@@ -77,7 +77,7 @@ export class CocoonConnection implements Connection {
     this.webrtc.sendAdi({
       type: 'adi_request',
       request_id: requestId,
-      service,
+      plugin,
       method,
       params: params ?? {},
     });
@@ -98,7 +98,7 @@ export class CocoonConnection implements Connection {
     }
   }
 
-  async httpProxy(service: string, path: string, init?: RequestInit): Promise<Response> {
+  async httpProxy(plugin: string, path: string, init?: RequestInit): Promise<Response> {
     await this.webrtc.connect();
     const requestId = genId();
     return new Promise<Response>((resolve, reject) => {
@@ -112,7 +112,7 @@ export class CocoonConnection implements Connection {
       this.webrtc.sendAdi({
         type: 'proxy_http',
         request_id: requestId,
-        service_name: service,
+        service_name: plugin,
         method: init?.method ?? 'GET',
         path,
         headers: Object.fromEntries(new Headers(init?.headers).entries()),
@@ -125,19 +125,19 @@ export class CocoonConnection implements Connection {
     return fetch(url, init);
   }
 
-  /** Queries available services from the cocoon and populates this.services. */
-  async refreshServices(): Promise<string[]> {
+  /** Queries available plugins from the cocoon and populates this.plugins. */
+  async refreshPlugins(): Promise<string[]> {
     await this.webrtc.connect();
     const requestId = genId();
-    const serviceInfos = await new Promise<Array<{ id: string }>>((resolve, reject) => {
+    const pluginInfos = await new Promise<Array<{ id: string }>>((resolve, reject) => {
       this.pending.set(requestId, {
         resolve: resolve as (data: unknown) => void,
         reject,
       });
-      this.webrtc.sendAdi({ type: 'list_services', request_id: requestId });
+      this.webrtc.sendAdi({ type: 'list_plugins', request_id: requestId });
     });
-    this.services = serviceInfos.map(s => s.id);
-    return this.services;
+    this.plugins = pluginInfos.map(s => s.id);
+    return this.plugins;
   }
 
   /** Install an ADI plugin on the cocoon (typed protocol message). */
@@ -184,22 +184,22 @@ export class CocoonConnection implements Connection {
         break;
       }
       case 'error': {
-        this.pending.get(requestId)?.reject(new Error(`${m['service']}.${m['method']}: ${m['message']}`));
+        this.pending.get(requestId)?.reject(new Error(`${m['plugin']}.${m['method']}: ${m['message']}`));
         this.pending.delete(requestId);
         break;
       }
-      case 'service_not_found': {
-        this.pending.get(requestId)?.reject(new Error(`Service '${m['service']}' not found`));
+      case 'plugin_not_found': {
+        this.pending.get(requestId)?.reject(new Error(`Plugin '${m['plugin']}' not found`));
         this.pending.delete(requestId);
         break;
       }
       case 'method_not_found': {
-        this.pending.get(requestId)?.reject(new Error(`Method '${m['method']}' not found on '${m['service']}'`));
+        this.pending.get(requestId)?.reject(new Error(`Method '${m['method']}' not found on '${m['plugin']}'`));
         this.pending.delete(requestId);
         break;
       }
-      case 'services_list': {
-        this.pending.get(requestId)?.resolve(m['services']);
+      case 'plugins_list': {
+        this.pending.get(requestId)?.resolve(m['plugins']);
         this.pending.delete(requestId);
         break;
       }

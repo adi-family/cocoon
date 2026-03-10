@@ -27,7 +27,7 @@ export interface SilkHtmlSpan {
   styles?: Record<string, string>;
 }
 
-export interface AdiServiceCapabilities {
+export interface AdiPluginCapabilities {
   subscriptions: boolean;
   notifications: boolean;
   streaming: boolean;
@@ -43,13 +43,13 @@ export interface AdiMethodInfo {
   deprecated_message?: string;
 }
 
-export interface AdiServiceInfo {
+export interface AdiPluginInfo {
   id: string;
   name: string;
   version: string;
   description?: string;
   methods: AdiMethodInfo[];
-  capabilities: AdiServiceCapabilities;
+  capabilities: AdiPluginCapabilities;
 }
 
 export interface PluginInstallResult {

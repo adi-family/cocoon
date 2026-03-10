@@ -568,7 +568,7 @@ impl WebRtcManager {
                                                     }
                                                 }
                                             }
-                                            AdiRouterResult::Stream { request_id, service, method, mut receiver } => {
+                                            AdiRouterResult::Stream { request_id, plugin, method, mut receiver } => {
                                                 // Handle streaming response
                                                 let dc_for_stream = dc_for_response.clone();
                                                 tokio::spawn(async move {
@@ -576,7 +576,7 @@ impl WebRtcManager {
                                                     while let Some((chunk_data, done)) = receiver.recv().await {
                                                         let response = AdiResponse::Stream {
                                                             request_id,
-                                                            service: service.clone(),
+                                                            plugin: plugin.clone(),
                                                             method: method.clone(),
                                                             data: chunk_data,
                                                             seq,
@@ -604,7 +604,7 @@ impl WebRtcManager {
                                         let error_response = serde_json::json!({
                                             "type": "error",
                                             "request_id": null,
-                                            "service": "",
+                                            "plugin": "",
                                             "method": "",
                                             "code": "invalid_request",
                                             "message": format!("Failed to parse request: {}", e)
@@ -619,10 +619,10 @@ impl WebRtcManager {
                                 let error_response = serde_json::json!({
                                     "type": "error",
                                     "request_id": null,
-                                    "service": "",
+                                    "plugin": "",
                                     "method": "",
                                     "code": "no_router",
-                                    "message": "ADI service router not configured"
+                                    "message": "ADI plugin router not configured"
                                 });
                                 if let Ok(error_json) = serde_json::to_string(&error_response) {
                                     let _ = dc_for_response.send(&error_json.into_bytes().into()).await;

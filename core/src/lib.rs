@@ -21,7 +21,7 @@ impl Default for protocol::types::AdiMethodInfo {
     }
 }
 
-impl Default for protocol::types::AdiServiceCapabilities {
+impl Default for protocol::types::AdiPluginCapabilities {
     fn default() -> Self {
         Self {
             subscriptions: false,

@@ -30,9 +30,9 @@ enum QueryType {
     searchKnowledgebase: "search_knowledgebase",
 }
 
-// ── ADI Service Discovery Types ─────────────────────────────
+// ── ADI Plugin Discovery Types ──────────────────────────────
 
-model AdiServiceCapabilities {
+model AdiPluginCapabilities {
     subscriptions: boolean;
     notifications: boolean;
     streaming: boolean;
@@ -48,13 +48,13 @@ model AdiMethodInfo {
     deprecated_message?: string;
 }
 
-model AdiServiceInfo {
+model AdiPluginInfo {
     id: string;
     name: string;
     version: string;
     description?: string;
     methods: AdiMethodInfo[];
-    capabilities: AdiServiceCapabilities;
+    capabilities: AdiPluginCapabilities;
 }
 
 // ── Silk Channel ────────────────────────────────────────────
@@ -107,46 +107,46 @@ interface Silk {
     error(session_id?: string, command_id?: string, code: string, message: string): void;
 }
 
-// ── ADI Service Channel ─────────────────────────────────────
+// ── ADI Plugin Channel ──────────────────────────────────────
 
 @channel("adi")
 interface Adi {
     // Request/Response
     @event
-    request(request_id: string, service: string, method: string, params: unknown): void;
+    request(request_id: string, plugin: string, method: string, params: unknown): void;
 
     @event
-    success(request_id: string, service: string, method: string, data: unknown): void;
+    success(request_id: string, plugin: string, method: string, data: unknown): void;
 
     @event
-    requestError(request_id: string, service: string, method: string, code: string, message: string): void;
+    requestError(request_id: string, plugin: string, method: string, code: string, message: string): void;
 
     @event
-    serviceNotFound(request_id: string, service: string): void;
+    pluginNotFound(request_id: string, plugin: string): void;
 
     @event
-    methodNotFound(request_id: string, service: string, method: string, available_methods: string[]): void;
+    methodNotFound(request_id: string, plugin: string, method: string, available_methods: string[]): void;
 
     @event
-    streamChunk(request_id: string, service: string, method: string, data: unknown, done: boolean): void;
+    streamChunk(request_id: string, plugin: string, method: string, data: unknown, done: boolean): void;
 
     // Discovery
     @event
-    listServices(request_id: string): void;
+    listPlugins(request_id: string): void;
 
     @event
-    servicesList(request_id: string, services: AdiServiceInfo[]): void;
+    pluginsList(request_id: string, plugins: AdiPluginInfo[]): void;
 
     // Notifications
     @event
-    servicesChanged(added: string[], removed: string[], updated: string[]): void;
+    pluginsChanged(added: string[], removed: string[], updated: string[]): void;
 
     // Subscriptions
     @event
-    subscribe(request_id: string, service: string, event: string, filter?: unknown): void;
+    subscribe(request_id: string, plugin: string, event: string, filter?: unknown): void;
 
     @event
-    subscribed(request_id: string, subscription_id: string, service: string, event: string): void;
+    subscribed(request_id: string, subscription_id: string, plugin: string, event: string): void;
 
     @event
     unsubscribe(subscription_id: string): void;

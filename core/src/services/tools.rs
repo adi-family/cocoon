@@ -1013,8 +1013,8 @@ impl ToolsService {
 
 #[async_trait]
 impl AdiService for ToolsService {
-    fn service_id(&self) -> &str {
-        "tools"
+    fn plugin_id(&self) -> &str {
+        "adi.tools"
     }
 
     fn name(&self) -> &str {

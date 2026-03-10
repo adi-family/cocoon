@@ -15,7 +15,7 @@ use crate::adi_router::{
 };
 use tasks_core::{CreateTask, Task, TaskId, TaskManager, TaskStatus};
 use async_trait::async_trait;
-use crate::protocol::types::{AdiMethodInfo, AdiServiceCapabilities};
+use crate::protocol::types::{AdiMethodInfo, AdiPluginCapabilities};
 use serde_json::{json, Value as JsonValue};
 use std::path::Path;
 use std::sync::Arc;
@@ -344,8 +344,8 @@ impl TasksService {
 impl AdiService for TasksService {
     // ========== Identity ==========
 
-    fn service_id(&self) -> &str {
-        "tasks"
+    fn plugin_id(&self) -> &str {
+        "adi.tasks"
     }
 
     fn name(&self) -> &str {
@@ -362,8 +362,8 @@ impl AdiService for TasksService {
 
     // ========== Capabilities ==========
 
-    fn capabilities(&self) -> AdiServiceCapabilities {
-        AdiServiceCapabilities {
+    fn capabilities(&self) -> AdiPluginCapabilities {
+        AdiPluginCapabilities {
             subscriptions: true,
             notifications: true,
             streaming: true,
@@ -778,7 +778,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let service = TasksService::new(dir.path()).unwrap();
 
-        assert_eq!(service.service_id(), "tasks");
+        assert_eq!(service.plugin_id(), "adi.tasks");
         assert_eq!(service.name(), "Task Management");
         assert!(service.description().is_some());
         

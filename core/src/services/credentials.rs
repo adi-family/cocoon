@@ -1,5 +1,5 @@
 use crate::adi_router::{AdiCallerContext, AdiHandleResult, AdiService, AdiServiceError};
-use crate::protocol::types::{AdiMethodInfo, AdiServiceCapabilities};
+use crate::protocol::types::{AdiMethodInfo, AdiPluginCapabilities};
 use async_trait::async_trait;
 use credentials_core::{
     Config, CredentialRow, CredentialType, Database, SecretManager,
@@ -419,8 +419,8 @@ fn row_to_json(row: &CredentialRow) -> JsonValue {
 
 #[async_trait]
 impl AdiService for CredentialsService {
-    fn service_id(&self) -> &str {
-        "credentials"
+    fn plugin_id(&self) -> &str {
+        "adi.credentials"
     }
 
     fn name(&self) -> &str {
@@ -435,8 +435,8 @@ impl AdiService for CredentialsService {
         Some("Secure credential storage with encryption, audit logging, and expiry verification")
     }
 
-    fn capabilities(&self) -> AdiServiceCapabilities {
-        AdiServiceCapabilities {
+    fn capabilities(&self) -> AdiPluginCapabilities {
+        AdiPluginCapabilities {
             subscriptions: false,
             notifications: false,
             streaming: false,

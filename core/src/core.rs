@@ -1010,63 +1010,59 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let silk_sessions: Arc<Mutex<HashMap<Uuid, SilkSession>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
-    // ADI service router - register services for WebRTC "adi" channel
+    // ADI plugin router - register plugins for WebRTC "adi" channel
     let adi_router = {
         let mut router = AdiRouter::new();
-        
-        // Register tasks service if enabled
+
         #[cfg(feature = "tasks-core")]
         {
             match crate::services::TasksService::new_global() {
                 Ok(tasks_service) => {
                     router.register(std::sync::Arc::new(tasks_service));
-                    tracing::info!("📦 Registered ADI service: tasks");
+                    tracing::info!("📦 Registered ADI plugin: adi.tasks");
                 }
                 Err(e) => {
-                    tracing::warn!("⚠️ Failed to initialize tasks service: {}", e);
+                    tracing::warn!("⚠️ Failed to initialize tasks plugin: {}", e);
                 }
             }
         }
-        
-        // Register knowledgebase service if enabled
+
         #[cfg(feature = "kb-core")]
         {
             match crate::services::KnowledgebaseService::new().await {
                 Ok(kb_service) => {
                     router.register(std::sync::Arc::new(kb_service));
-                    tracing::info!("📦 Registered ADI service: knowledgebase");
+                    tracing::info!("📦 Registered ADI plugin: adi.knowledgebase");
                 }
                 Err(e) => {
-                    tracing::warn!("⚠️ Failed to initialize knowledgebase service: {}", e);
+                    tracing::warn!("⚠️ Failed to initialize knowledgebase plugin: {}", e);
                 }
             }
         }
 
-        // Register credentials service if enabled
         #[cfg(feature = "credentials-core")]
         {
             match crate::services::CredentialsService::from_env().await {
                 Ok(credentials_service) => {
                     router.register(std::sync::Arc::new(credentials_service));
-                    tracing::info!("📦 Registered ADI service: credentials");
+                    tracing::info!("📦 Registered ADI plugin: adi.credentials");
                 }
                 Err(e) => {
-                    tracing::warn!("⚠️ Failed to initialize credentials service: {}", e);
+                    tracing::warn!("⚠️ Failed to initialize credentials plugin: {}", e);
                 }
             }
         }
 
-        // Register tools service (always available)
         let tools_service = crate::services::ToolsService::new();
         let tool_count = tools_service.list_all_tools().len();
         router.register(std::sync::Arc::new(tools_service));
-        tracing::info!("📦 Registered ADI service: tools ({} tools)", tool_count);
+        tracing::info!("📦 Registered ADI plugin: adi.tools ({} tools)", tool_count);
 
         router
     };
 
-    let adi_services: Vec<String> = adi_router
-        .list_services()
+    let adi_plugins: Vec<String> = adi_router
+        .list_plugins()
         .iter()
         .map(|s| format!("{}:{}", s.id, s.version))
         .collect();
@@ -1150,7 +1146,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| vec!["silk".to_string()]);
 
     let device_config = Some(serde_json::json!({
-        "adi_services": adi_services,
+        "adi_plugins": adi_plugins,
         "protocols": protocols,
     }));
 

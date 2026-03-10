@@ -3,7 +3,7 @@
  * DO NOT EDIT.
  */
 
-import type { AdiServiceInfo, QueryType, SilkHtmlSpan, SilkSignal, SilkStream } from './types';
+import type { AdiPluginInfo, QueryType, SilkHtmlSpan, SilkSignal, SilkStream } from './types';
 
 export type SignalingMessage =
   // ── silk ──
@@ -23,17 +23,17 @@ export type SignalingMessage =
   | { type: 'silk_error'; session_id?: string; command_id?: string; code: string; message: string }
 
   // ── adi ──
-  | { type: 'adi_request'; request_id: string; service: string; method: string; params: unknown }
-  | { type: 'adi_success'; request_id: string; service: string; method: string; data: unknown }
-  | { type: 'adi_request_error'; request_id: string; service: string; method: string; code: string; message: string }
-  | { type: 'adi_service_not_found'; request_id: string; service: string }
-  | { type: 'adi_method_not_found'; request_id: string; service: string; method: string; available_methods: string[] }
-  | { type: 'adi_stream_chunk'; request_id: string; service: string; method: string; data: unknown; done: boolean }
-  | { type: 'adi_list_services'; request_id: string }
-  | { type: 'adi_services_list'; request_id: string; services: AdiServiceInfo[] }
-  | { type: 'adi_services_changed'; added: string[]; removed: string[]; updated: string[] }
-  | { type: 'adi_subscribe'; request_id: string; service: string; event: string; filter?: unknown }
-  | { type: 'adi_subscribed'; request_id: string; subscription_id: string; service: string; event: string }
+  | { type: 'adi_request'; request_id: string; plugin: string; method: string; params: unknown }
+  | { type: 'adi_success'; request_id: string; plugin: string; method: string; data: unknown }
+  | { type: 'adi_request_error'; request_id: string; plugin: string; method: string; code: string; message: string }
+  | { type: 'adi_plugin_not_found'; request_id: string; plugin: string }
+  | { type: 'adi_method_not_found'; request_id: string; plugin: string; method: string; available_methods: string[] }
+  | { type: 'adi_stream_chunk'; request_id: string; plugin: string; method: string; data: unknown; done: boolean }
+  | { type: 'adi_list_plugins'; request_id: string }
+  | { type: 'adi_plugins_list'; request_id: string; plugins: AdiPluginInfo[] }
+  | { type: 'adi_plugins_changed'; added: string[]; removed: string[]; updated: string[] }
+  | { type: 'adi_subscribe'; request_id: string; plugin: string; event: string; filter?: unknown }
+  | { type: 'adi_subscribed'; request_id: string; subscription_id: string; plugin: string; event: string }
   | { type: 'adi_unsubscribe'; subscription_id: string }
   | { type: 'adi_unsubscribed'; subscription_id: string }
   | { type: 'adi_subscription_event'; subscription_id: string; event: string; data: unknown }

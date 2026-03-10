@@ -8,7 +8,7 @@ use crate::adi_router::{
 };
 use async_trait::async_trait;
 use kb_core::{EdgeType, Knowledgebase, NodeType};
-use crate::protocol::types::{AdiMethodInfo, AdiServiceCapabilities};
+use crate::protocol::types::{AdiMethodInfo, AdiPluginCapabilities};
 use serde_json::{json, Value as JsonValue};
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
@@ -254,8 +254,8 @@ impl KnowledgebaseService {
 
 #[async_trait]
 impl AdiService for KnowledgebaseService {
-    fn service_id(&self) -> &str {
-        "kb"
+    fn plugin_id(&self) -> &str {
+        "adi.knowledgebase"
     }
 
     fn name(&self) -> &str {
@@ -270,8 +270,8 @@ impl AdiService for KnowledgebaseService {
         Some("Semantic search, graph DB, and knowledge management. Store, query, and connect knowledge nodes with confidence scoring and conflict detection.")
     }
 
-    fn capabilities(&self) -> AdiServiceCapabilities {
-        AdiServiceCapabilities {
+    fn capabilities(&self) -> AdiPluginCapabilities {
+        AdiPluginCapabilities {
             subscriptions: true,
             notifications: true,
             streaming: false,

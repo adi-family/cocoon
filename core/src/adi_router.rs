@@ -15,7 +15,7 @@
 //! - Optional subscription support for real-time events
 
 use async_trait::async_trait;
-use crate::protocol::types::{AdiMethodInfo, AdiServiceCapabilities, AdiServiceInfo};
+use crate::protocol::types::{AdiMethodInfo, AdiPluginCapabilities, AdiPluginInfo};
 use serde::{Serialize, Deserialize};
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
@@ -26,7 +26,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdiRequest {
     pub request_id: Uuid,
-    pub service: String,
+    pub plugin: String,
     pub method: String,
     pub params: JsonValue,
 }
@@ -34,30 +34,30 @@ pub struct AdiRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AdiResponse {
-    Success { request_id: Uuid, service: String, method: String, data: JsonValue },
-    Error { request_id: Uuid, service: String, method: String, code: String, message: String },
-    ServiceNotFound { request_id: Uuid, service: String },
-    MethodNotFound { request_id: Uuid, service: String, method: String, available_methods: Vec<String> },
-    Stream { request_id: Uuid, service: String, method: String, data: JsonValue, seq: u32, done: bool },
+    Success { request_id: Uuid, plugin: String, method: String, data: JsonValue },
+    Error { request_id: Uuid, plugin: String, method: String, code: String, message: String },
+    PluginNotFound { request_id: Uuid, plugin: String },
+    MethodNotFound { request_id: Uuid, plugin: String, method: String, available_methods: Vec<String> },
+    Stream { request_id: Uuid, plugin: String, method: String, data: JsonValue, seq: u32, done: bool },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AdiDiscovery {
-    ListServices { request_id: Uuid },
-    ServicesList { request_id: Uuid, services: Vec<AdiServiceInfo> },
+    ListPlugins { request_id: Uuid },
+    PluginsList { request_id: Uuid, plugins: Vec<AdiPluginInfo> },
 }
 
 #[derive(Debug, Clone)]
 pub enum AdiNotification {
-    ServicesChanged { added: Vec<String>, removed: Vec<String>, updated: Vec<String> },
+    PluginsChanged { added: Vec<String>, removed: Vec<String>, updated: Vec<String> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AdiSubscription {
-    Subscribe { request_id: Uuid, service: String, event: String, filter: Option<JsonValue> },
-    Subscribed { request_id: Uuid, subscription_id: Uuid, service: String, event: String },
+    Subscribe { request_id: Uuid, plugin: String, event: String, filter: Option<JsonValue> },
+    Subscribed { request_id: Uuid, subscription_id: Uuid, plugin: String, event: String },
     Unsubscribe { subscription_id: Uuid },
     Unsubscribed { subscription_id: Uuid },
     Error { request_id: Uuid, code: String, message: String },
@@ -154,14 +154,14 @@ impl AdiCallerContext {
     }
 }
 
-/// Trait that services implement to handle requests
+/// Trait that plugins implement to handle requests
 ///
-/// Services are registered with the router and receive method calls.
-/// Each service has a unique ID (e.g., "tasks", "indexer", "kb").
+/// Plugins are registered with the router and receive method calls.
+/// Each plugin has a unique ID matching its registry ID (e.g., "adi.tasks", "adi.credentials").
 ///
 /// ## MCP-Style Features
 ///
-/// Services can optionally support:
+/// Plugins can optionally support:
 /// - **Subscriptions**: Real-time event streams via `subscribe()`
 /// - **Notifications**: Async events broadcast to all connected clients
 /// - **Streaming**: Long-running operations with chunked responses
@@ -169,16 +169,16 @@ impl AdiCallerContext {
 pub trait AdiService: Send + Sync {
     // ========== Identity ==========
 
-    /// Service identifier (e.g., "tasks", "indexer", "kb", "agent")
-    fn service_id(&self) -> &str;
+    /// Plugin identifier matching registry ID (e.g., "adi.tasks", "adi.credentials")
+    fn plugin_id(&self) -> &str;
 
-    /// Human-readable service name (e.g., "Task Management")
+    /// Human-readable plugin name (e.g., "Task Management")
     fn name(&self) -> &str;
 
-    /// Service version (semver)
+    /// Plugin version (semver)
     fn version(&self) -> &str;
 
-    /// Human-readable description of the service
+    /// Human-readable description of the plugin
     fn description(&self) -> Option<&str> {
         None
     }
@@ -188,9 +188,9 @@ pub trait AdiService: Send + Sync {
     /// List available methods with their descriptions and schemas
     fn methods(&self) -> Vec<AdiMethodInfo>;
 
-    /// Service-level capabilities
-    fn capabilities(&self) -> AdiServiceCapabilities {
-        AdiServiceCapabilities::default()
+    /// Plugin-level capabilities
+    fn capabilities(&self) -> AdiPluginCapabilities {
+        AdiPluginCapabilities::default()
     }
 
     // ========== Request Handling ==========
@@ -274,15 +274,15 @@ pub struct SubscriptionEvent {
 /// Active subscription tracking
 #[derive(Debug)]
 pub struct ActiveSubscription {
-    /// Service ID
-    pub service: String,
+    /// Plugin ID
+    pub plugin: String,
     /// Event name
     pub event: String,
 }
 
-/// Router that dispatches ADI requests to registered services
+/// Router that dispatches ADI requests to registered plugins
 pub struct AdiRouter {
-    services: HashMap<String, Arc<dyn AdiService>>,
+    plugins: HashMap<String, Arc<dyn AdiService>>,
     /// Active subscriptions: subscription_id -> subscription info
     subscriptions: Arc<RwLock<HashMap<Uuid, ActiveSubscription>>>,
     /// Notification broadcast channel
@@ -300,7 +300,7 @@ impl AdiRouter {
     pub fn new() -> Self {
         let (notification_tx, _) = broadcast::channel(256);
         Self {
-            services: HashMap::new(),
+            plugins: HashMap::new(),
             subscriptions: Arc::new(RwLock::new(HashMap::new())),
             notification_tx,
         }
@@ -316,34 +316,33 @@ impl AdiRouter {
         let _ = self.notification_tx.send(notification);
     }
 
-    /// Register a service handler
+    /// Register a plugin handler
     ///
-    /// If a service with the same ID already exists, it will be replaced.
-    pub fn register(&mut self, service: Arc<dyn AdiService>) {
-        let id = service.service_id().to_string();
-        let caps = service.capabilities();
+    /// If a plugin with the same ID already exists, it will be replaced.
+    pub fn register(&mut self, plugin: Arc<dyn AdiService>) {
+        let id = plugin.plugin_id().to_string();
+        let caps = plugin.capabilities();
         tracing::info!(
-            "Registered ADI service: {} v{} ({}) [streaming={}, notifications={}, subscriptions={}]",
+            "Registered ADI plugin: {} v{} ({}) [streaming={}, notifications={}, subscriptions={}]",
             id,
-            service.version(),
-            service.name(),
+            plugin.version(),
+            plugin.name(),
             caps.streaming,
             caps.notifications,
             caps.subscriptions
         );
-        
-        let was_new = !self.services.contains_key(&id);
-        self.services.insert(id.clone(), service);
 
-        // Broadcast service change notification
+        let was_new = !self.plugins.contains_key(&id);
+        self.plugins.insert(id.clone(), plugin);
+
         if was_new {
-            self.broadcast_notification(AdiNotification::ServicesChanged {
+            self.broadcast_notification(AdiNotification::PluginsChanged {
                 added: vec![id],
                 removed: vec![],
                 updated: vec![],
             });
         } else {
-            self.broadcast_notification(AdiNotification::ServicesChanged {
+            self.broadcast_notification(AdiNotification::PluginsChanged {
                 added: vec![],
                 removed: vec![],
                 updated: vec![id],
@@ -351,15 +350,14 @@ impl AdiRouter {
         }
     }
 
-    /// Unregister a service by ID
-    pub fn unregister(&mut self, service_id: &str) -> bool {
-        if self.services.remove(service_id).is_some() {
-            tracing::info!("Unregistered ADI service: {}", service_id);
-            
-            // Broadcast service removal
-            self.broadcast_notification(AdiNotification::ServicesChanged {
+    /// Unregister a plugin by ID
+    pub fn unregister(&mut self, plugin_id: &str) -> bool {
+        if self.plugins.remove(plugin_id).is_some() {
+            tracing::info!("Unregistered ADI plugin: {}", plugin_id);
+
+            self.broadcast_notification(AdiNotification::PluginsChanged {
                 added: vec![],
-                removed: vec![service_id.to_string()],
+                removed: vec![plugin_id.to_string()],
                 updated: vec![],
             });
             true
@@ -368,22 +366,22 @@ impl AdiRouter {
         }
     }
 
-    /// Check if a service is registered
-    pub fn has_service(&self, service_id: &str) -> bool {
-        self.services.contains_key(service_id)
+    /// Check if a plugin is registered
+    pub fn has_plugin(&self, plugin_id: &str) -> bool {
+        self.plugins.contains_key(plugin_id)
     }
 
-    /// Get a service by ID
-    pub fn get_service(&self, service_id: &str) -> Option<Arc<dyn AdiService>> {
-        self.services.get(service_id).cloned()
+    /// Get a plugin by ID
+    pub fn get_plugin(&self, plugin_id: &str) -> Option<Arc<dyn AdiService>> {
+        self.plugins.get(plugin_id).cloned()
     }
 
-    /// Get list of registered services with full metadata
-    pub fn list_services(&self) -> Vec<AdiServiceInfo> {
-        self.services
+    /// Get list of registered plugins with full metadata
+    pub fn list_plugins(&self) -> Vec<AdiPluginInfo> {
+        self.plugins
             .values()
-            .map(|s| AdiServiceInfo {
-                id: s.service_id().to_string(),
+            .map(|s| AdiPluginInfo {
+                id: s.plugin_id().to_string(),
                 name: s.name().to_string(),
                 version: s.version().to_string(),
                 description: s.description().map(String::from),
@@ -396,11 +394,10 @@ impl AdiRouter {
     /// Handle a discovery request
     pub fn handle_discovery(&self, discovery: AdiDiscovery) -> AdiDiscovery {
         match discovery {
-            AdiDiscovery::ListServices { request_id } => AdiDiscovery::ServicesList {
+            AdiDiscovery::ListPlugins { request_id } => AdiDiscovery::PluginsList {
                 request_id,
-                services: self.list_services(),
+                plugins: self.list_plugins(),
             },
-            // ServicesList is a response, not a request
             other => other,
         }
     }
@@ -410,46 +407,43 @@ impl AdiRouter {
         match subscription {
             AdiSubscription::Subscribe {
                 request_id,
-                service,
+                plugin,
                 event,
                 filter,
             } => {
-                let svc = match self.services.get(&service) {
+                let svc = match self.plugins.get(&plugin) {
                     Some(s) => s,
                     None => {
                         return AdiSubscription::Error {
                             request_id,
-                            code: "service_not_found".to_string(),
-                            message: format!("Service '{}' not found", service),
+                            code: "plugin_not_found".to_string(),
+                            message: format!("Plugin '{}' not found", plugin),
                         };
                     }
                 };
 
-                // Check if service supports subscriptions
                 if !svc.capabilities().subscriptions {
                     return AdiSubscription::Error {
                         request_id,
                         code: "not_supported".to_string(),
-                        message: format!("Service '{}' does not support subscriptions", service),
+                        message: format!("Plugin '{}' does not support subscriptions", plugin),
                     };
                 }
 
-                // Try to subscribe
                 match svc.subscribe(&event, filter).await {
                     Ok(_receiver) => {
                         let subscription_id = Uuid::new_v4();
-                        
-                        // Track the subscription
+
                         let mut subs = self.subscriptions.write().await;
                         subs.insert(subscription_id, ActiveSubscription {
-                            service: service.clone(),
+                            plugin: plugin.clone(),
                             event: event.clone(),
                         });
 
                         AdiSubscription::Subscribed {
                             request_id,
                             subscription_id,
-                            service,
+                            plugin,
                             event,
                         }
                     }
@@ -466,63 +460,57 @@ impl AdiRouter {
                 if subs.remove(&subscription_id).is_some() {
                     AdiSubscription::Unsubscribed { subscription_id }
                 } else {
-                    // Subscription not found, but still return unsubscribed
                     AdiSubscription::Unsubscribed { subscription_id }
                 }
             }
 
-            // Pass through other messages unchanged
             other => other,
         }
     }
 
     /// Handle an incoming ADI request
     ///
-    /// Routes the request to the appropriate service and returns the response.
-    /// For streaming responses, returns the first chunk and provides a channel
-    /// for subsequent chunks.
+    /// Routes the request to the appropriate plugin and returns the response.
     pub async fn handle(&self, ctx: &AdiCallerContext, request: AdiRequest) -> AdiRouterResult {
-        let service = match self.services.get(&request.service) {
+        let plugin_svc = match self.plugins.get(&request.plugin) {
             Some(s) => s,
             None => {
-                return AdiRouterResult::Single(AdiResponse::ServiceNotFound {
+                return AdiRouterResult::Single(AdiResponse::PluginNotFound {
                     request_id: request.request_id,
-                    service: request.service,
+                    plugin: request.plugin,
                 });
             }
         };
 
-        // Check if method exists
-        let methods = service.methods();
+        let methods = plugin_svc.methods();
         let method_exists = methods.iter().any(|m| m.name == request.method);
         if !method_exists {
             return AdiRouterResult::Single(AdiResponse::MethodNotFound {
                 request_id: request.request_id,
-                service: request.service,
+                plugin: request.plugin,
                 method: request.method,
                 available_methods: methods.iter().map(|m| m.name.clone()).collect(),
             });
         }
 
-        // Handle the request
-        match service.handle(ctx, &request.method, request.params).await {
+        match plugin_svc.handle(ctx, &request.method, request.params).await {
             Ok(AdiHandleResult::Success(data)) => {
                 AdiRouterResult::Single(AdiResponse::Success {
                     request_id: request.request_id,
-                    service: request.service,
+                    plugin: request.plugin,
                     method: request.method,
                     data,
                 })
             }
             Ok(AdiHandleResult::Stream(rx)) => AdiRouterResult::Stream {
                 request_id: request.request_id,
-                service: request.service,
+                plugin: request.plugin,
                 method: request.method,
                 receiver: rx,
             },
             Err(e) => AdiRouterResult::Single(AdiResponse::Error {
                 request_id: request.request_id,
-                service: request.service,
+                plugin: request.plugin,
                 method: request.method,
                 code: e.code,
                 message: e.message,
@@ -532,15 +520,15 @@ impl AdiRouter {
 
     /// Notify that a client connected
     pub fn client_connected(&self, client_id: &str) {
-        for service in self.services.values() {
-            service.on_client_connected(client_id);
+        for plugin in self.plugins.values() {
+            plugin.on_client_connected(client_id);
         }
     }
 
     /// Notify that a client disconnected
     pub fn client_disconnected(&self, client_id: &str) {
-        for service in self.services.values() {
-            service.on_client_disconnected(client_id);
+        for plugin in self.plugins.values() {
+            plugin.on_client_disconnected(client_id);
         }
     }
 
@@ -555,7 +543,7 @@ impl AdiRouter {
             .read()
             .await
             .iter()
-            .map(|(id, sub)| (*id, sub.service.clone(), sub.event.clone()))
+            .map(|(id, sub)| (*id, sub.plugin.clone(), sub.event.clone()))
             .collect()
     }
 }
@@ -567,7 +555,7 @@ pub enum AdiRouterResult {
     /// Streaming response
     Stream {
         request_id: Uuid,
-        service: String,
+        plugin: String,
         method: String,
         receiver: mpsc::Receiver<(JsonValue, bool)>,
     },
@@ -630,8 +618,8 @@ mod tests {
 
     #[async_trait]
     impl AdiService for TestService {
-        fn service_id(&self) -> &str {
-            "test"
+        fn plugin_id(&self) -> &str {
+            "adi.test"
         }
 
         fn name(&self) -> &str {
@@ -697,10 +685,10 @@ mod tests {
         let mut router = AdiRouter::new();
         router.register(Arc::new(TestService));
 
-        let services = router.list_services();
-        assert_eq!(services.len(), 1);
-        assert_eq!(services[0].id, "test");
-        assert_eq!(services[0].methods.len(), 2);
+        let plugins = router.list_plugins();
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].id, "adi.test");
+        assert_eq!(plugins[0].methods.len(), 2);
     }
 
     #[tokio::test]
@@ -710,7 +698,7 @@ mod tests {
 
         let request = AdiRequest {
             request_id: Uuid::nil(),
-            service: "test".to_string(),
+            plugin: "adi.test".to_string(),
             method: "echo".to_string(),
             params: json!({"hello": "world"}),
         };
@@ -725,22 +713,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_router_service_not_found() {
+    async fn test_router_plugin_not_found() {
         let router = AdiRouter::new();
 
         let request = AdiRequest {
             request_id: Uuid::nil(),
-            service: "nonexistent".to_string(),
+            plugin: "nonexistent".to_string(),
             method: "test".to_string(),
             params: json!({}),
         };
 
         let result = router.handle(&AdiCallerContext::anonymous(), request).await;
         match result {
-            AdiRouterResult::Single(AdiResponse::ServiceNotFound { service, .. }) => {
-                assert_eq!(service, "nonexistent");
+            AdiRouterResult::Single(AdiResponse::PluginNotFound { plugin, .. }) => {
+                assert_eq!(plugin, "nonexistent");
             }
-            _ => panic!("Expected service not found"),
+            _ => panic!("Expected plugin not found"),
         }
     }
 
@@ -751,7 +739,7 @@ mod tests {
 
         let request = AdiRequest {
             request_id: Uuid::nil(),
-            service: "test".to_string(),
+            plugin: "adi.test".to_string(),
             method: "nonexistent".to_string(),
             params: json!({}),
         };
@@ -777,7 +765,7 @@ mod tests {
 
         let request = AdiRequest {
             request_id: Uuid::nil(),
-            service: "test".to_string(),
+            plugin: "adi.test".to_string(),
             method: "count".to_string(),
             params: json!({"n": 3}),
         };
