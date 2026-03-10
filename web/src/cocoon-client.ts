@@ -1,4 +1,4 @@
-import "@adi/signaling-web-plugin/bus";
+import "@adi-family/plugin-signaling/bus";
 import { Logger, trace, type EventBus } from '@adi-family/sdk-plugin';
 import type { SilkResponse } from './silk-types';
 import { SilkSession } from './silk-session';

@@ -1,5 +1,5 @@
 {
-  "name": "@adi/cocoon-web-plugin",
+  "name": "@adi-family/plugin-cocoon",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -17,14 +17,14 @@
   "dependencies": {
     "@adi-family/cocoon-plugin-interface": "workspace:*",
     "@adi-family/sdk-plugin": "workspace:*",
-    "@adi/auth-web-plugin": "workspace:*",
-    "@adi/debug-screen-web-plugin": "workspace:*",
-    "@adi/router-web-plugin": "workspace:*",
-    "@adi/signaling-web-plugin": "workspace:*",
-    "lit": "^3.3.1"
+    "@adi-family/plugin-auth": "workspace:*",
+    "@adi-family/plugin-debug-screen": "workspace:*",
+    "@adi-family/plugin-router": "workspace:*",
+    "@adi-family/plugin-signaling": "workspace:*",
+    "lit": "^3.3.2"
   },
   "devDependencies": {
-    "typescript": "^5.7.0",
-    "vite": "^6.1.0"
+    "typescript": "~5.9.3",
+    "vite": "^7.3.1"
   }
 }

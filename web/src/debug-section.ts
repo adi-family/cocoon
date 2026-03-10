@@ -1,6 +1,6 @@
 import { LitElement, html, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
-import type { DeviceInfo } from '@adi/signaling-web-plugin/bus';
+import type { DeviceInfo } from '@adi-family/plugin-signaling/bus';
 
 export interface CocoonDebugInfo {
   cocoonId: string;

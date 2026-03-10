@@ -1,8 +1,8 @@
-import '@adi/auth-web-plugin';
-import '@adi/signaling-web-plugin';
+import '@adi-family/plugin-auth';
+import '@adi-family/plugin-signaling';
 import { AdiPlugin } from '@adi-family/sdk-plugin';
-import { AdiDebugScreenBusKey } from '@adi/debug-screen-web-plugin/bus';
-import { AdiSignalingBusKey, type DeviceInfo } from '@adi/signaling-web-plugin/bus';
+import { AdiDebugScreenBusKey } from '@adi-family/plugin-debug-screen/bus';
+import { AdiSignalingBusKey, type DeviceInfo } from '@adi-family/plugin-signaling/bus';
 import { CocoonBusKey } from '@adi-family/cocoon-plugin-interface';
 import { CocoonClient } from './cocoon-client';
 import { CocoonConnection } from './cocoon-connection';

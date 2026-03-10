@@ -1,4 +1,4 @@
-import type { Connection } from '@adi/signaling-web-plugin/bus';
+import type { Connection } from '@adi-family/plugin-signaling/bus';
 import type { CocoonWebRTC } from './cocoon-webrtc';
 import type { SignalingMessage } from './generated/messages';
 
