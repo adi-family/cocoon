@@ -1,8 +1,3 @@
-//! Browser pairing server for cocoon setup.
-//!
-//! Starts a local HTTP server that the browser connects to with a setup token,
-//! then installs and starts the cocoon as a machine runtime service.
-
 use lib_console_output::{out_info, out_success};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -90,7 +85,6 @@ pub async fn run_setup(port: u16, cli_url: Option<String>) -> Result<String, Str
     result
 }
 
-/// Shared state for the setup server.
 struct SetupServerState {
     connected: RwLock<bool>,
     hostname: String,
@@ -98,7 +92,6 @@ struct SetupServerState {
     signaling_override: Option<Arc<String>>,
 }
 
-/// Request body for the /connect endpoint.
 #[derive(serde::Deserialize)]
 struct ConnectRequest {
     token: String,
@@ -111,7 +104,6 @@ fn default_signaling_url() -> String {
         .unwrap_or_else(|| "ws://localhost:8080/ws".to_string())
 }
 
-/// Health endpoint for browser polling.
 async fn health_handler(
     axum::extract::State(state): axum::extract::State<Arc<SetupServerState>>,
 ) -> axum::Json<serde_json::Value> {
@@ -165,7 +157,6 @@ async fn connect_handler(
     )
 }
 
-/// Get a friendly machine name for display.
 fn get_machine_name() -> String {
     #[cfg(target_os = "macos")]
     {

@@ -1,9 +1,3 @@
-//! Silk Terminal - HTML-styled terminal with persistent shell sessions
-//!
-//! Silk maintains a persistent shell session that preserves environment variables,
-//! executes commands, and returns output as structured data with ANSI-to-HTML conversion.
-//! Interactive commands are automatically detected and spawned in a separate PTY.
-
 use crate::protocol::types::SilkHtmlSpan;
 use std::collections::HashMap;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -46,7 +40,6 @@ const INTERACTIVE_COMMANDS: &[&str] = &[
     "redis-cli",
 ];
 
-/// A Silk session - persistent shell for command execution
 pub struct SilkSession {
     pub id: Uuid,
     pub shell: String,
@@ -56,7 +49,6 @@ pub struct SilkSession {
     pub running_commands: HashMap<String, RunningCommand>,
 }
 
-/// A command running within a Silk session
 pub struct RunningCommand {
     pub id: String,
     pub command: String,
@@ -99,7 +91,6 @@ impl SilkSession {
         })
     }
 
-    /// Check if a command is likely interactive
     pub fn is_interactive_command(command: &str) -> bool {
         let cmd_name = command.split_whitespace().next().unwrap_or("");
 
@@ -116,7 +107,6 @@ impl SilkSession {
         false
     }
 
-    /// Execute a command in the session
     pub fn execute(
         &mut self,
         command: &str,
@@ -178,7 +168,6 @@ impl SilkSession {
         Ok((false, Some(child)))
     }
 
-    /// Update cwd if command was a cd
     pub fn update_cwd_if_cd(&mut self, command: &str) {
         let trimmed = command.trim();
         if trimmed.starts_with("cd ") {
@@ -213,11 +202,9 @@ impl SilkSession {
     }
 }
 
-/// ANSI to HTML converter
 pub struct AnsiToHtml;
 
 impl AnsiToHtml {
-    /// Convert ANSI escape codes to HTML spans
     pub fn convert(input: &str) -> Vec<SilkHtmlSpan> {
         let mut spans = Vec::new();
         let mut current_text = String::new();
@@ -237,7 +224,6 @@ impl AnsiToHtml {
                     current_text.clear();
                 }
 
-                // Parse escape sequence
                 if chars.peek() == Some(&'[') {
                     chars.next(); // consume '['
                     let mut code = String::new();

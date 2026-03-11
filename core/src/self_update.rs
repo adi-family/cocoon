@@ -1,9 +1,3 @@
-//! Self-update functionality for cocoon
-//!
-//! Provides the ability to check for updates and update cocoon across different runtimes:
-//! - Docker: Pull latest image and recreate container
-//! - Machine: Download new binary and restart service
-
 use lib_console_output::{out_info, out_success, KeyValue, Renderable};
 use semver::Version;
 use std::path::PathBuf;
@@ -18,7 +12,6 @@ const REPO_OWNER: &str = "adi-family";
 const REPO_NAME: &str = "cocoon";
 const DOCKER_IMAGE: &str = "docker-registry.the-ihor.com/cocoon";
 
-/// Result of checking for updates
 #[derive(Debug, Clone)]
 pub struct UpdateCheckResult {
     pub current_version: String,
@@ -27,7 +20,6 @@ pub struct UpdateCheckResult {
     pub release_notes: Option<String>,
 }
 
-/// Get the target triple for the current platform
 pub fn get_target_triple() -> String {
     let os = if cfg!(target_os = "linux") {
         "unknown-linux-musl"
@@ -50,7 +42,6 @@ pub fn get_target_triple() -> String {
     format!("{}-{}", arch, os)
 }
 
-/// Fetch the latest release version from GitHub
 pub fn fetch_latest_version() -> Result<(String, Option<String>), String> {
     use self_update::backends::github::ReleaseList;
 
@@ -72,12 +63,10 @@ pub fn fetch_latest_version() -> Result<(String, Option<String>), String> {
     Ok((version, notes))
 }
 
-/// Check for available updates (for Machine runtime - binary)
 pub fn check_for_updates() -> Result<UpdateCheckResult, String> {
     let current_version = env!("CARGO_PKG_VERSION");
     let (latest_version, release_notes) = fetch_latest_version()?;
 
-    // Parse versions for comparison
     let current = Version::parse(current_version).map_err(|e| {
         format!(
             "Failed to parse current version '{}': {}",
@@ -97,7 +86,6 @@ pub fn check_for_updates() -> Result<UpdateCheckResult, String> {
     })
 }
 
-/// Download and extract the latest binary for Machine runtime
 pub fn download_latest_binary(install_dir: &PathBuf) -> Result<String, String> {
     use self_update::backends::github::Update;
     use self_update::cargo_crate_version;
@@ -130,16 +118,13 @@ pub fn download_latest_binary(install_dir: &PathBuf) -> Result<String, String> {
     }
 }
 
-/// Docker-specific update functions
 pub mod docker {
     use lib_console_output::out_info;
     use super::DOCKER_IMAGE;
 
-    /// Pull the latest image and return whether it was updated
     pub fn pull_latest_image(tag: &str) -> Result<bool, String> {
         let image = format!("{}:{}", DOCKER_IMAGE, tag);
 
-        // Get current digest before pull
         let before_digest = std::process::Command::new("docker")
             .args(["images", "--digests", "--format", "{{.Digest}}", &image])
             .output()
@@ -163,7 +148,6 @@ pub mod docker {
             return Err("Failed to pull image".to_string());
         }
 
-        // Get digest after pull
         let after_digest = std::process::Command::new("docker")
             .args(["images", "--digests", "--format", "{{.Digest}}", &image])
             .output()
@@ -176,7 +160,6 @@ pub mod docker {
                 }
             });
 
-        // Check if image was updated
         let updated = match (before_digest, after_digest) {
             (Some(before), Some(after)) => before != after,
             (None, Some(_)) => true, // New image pulled
@@ -186,7 +169,6 @@ pub mod docker {
         Ok(updated)
     }
 
-    /// Get container environment variables
     pub fn get_container_env(container_name: &str) -> Result<Vec<(String, String)>, String> {
         let output = std::process::Command::new("docker")
             .args([
@@ -219,7 +201,6 @@ pub mod docker {
         Ok(env_vars)
     }
 
-    /// Get container volumes
     pub fn get_container_volumes(container_name: &str) -> Result<Vec<String>, String> {
         let output = std::process::Command::new("docker")
             .args([
@@ -245,16 +226,13 @@ pub mod docker {
         Ok(volumes)
     }
 
-    /// Recreate a container with the latest image
     pub fn recreate_container(container_name: &str, tag: &str) -> Result<String, String> {
         let image = format!("{}:{}", DOCKER_IMAGE, tag);
 
-        // Get container config before removing
         out_info!("  Saving container configuration...");
         let env_vars = get_container_env(container_name)?;
         let volumes = get_container_volumes(container_name)?;
 
-        // Stop and remove old container
         out_info!("  Stopping old container...");
         let _ = std::process::Command::new("docker")
             .args(["stop", container_name])
@@ -265,7 +243,6 @@ pub mod docker {
             .args(["rm", container_name])
             .status();
 
-        // Create new container with same config
         out_info!("  Creating new container...");
         let mut cmd = std::process::Command::new("docker");
         cmd.args([
@@ -277,7 +254,6 @@ pub mod docker {
             container_name,
         ]);
 
-        // Add environment variables
         for (key, value) in &env_vars {
             // Skip internal Docker env vars
             if key == "PATH" || key == "HOME" || key.starts_with("HOSTNAME") {
@@ -286,7 +262,6 @@ pub mod docker {
             cmd.args(["-e", &format!("{}={}", key, value)]);
         }
 
-        // Add volumes
         for vol in &volumes {
             cmd.args(["-v", vol]);
         }
@@ -322,11 +297,9 @@ pub mod docker {
         }
     }
 
-    /// Check if a newer image is available
     pub fn check_for_updates(tag: &str) -> Result<(bool, String), String> {
         let image = format!("{}:{}", DOCKER_IMAGE, tag);
 
-        // Get local digest
         let local_output = std::process::Command::new("docker")
             .args(["images", "--digests", "--format", "{{.Digest}}", &image])
             .output()
@@ -356,12 +329,10 @@ pub mod docker {
     }
 }
 
-/// Machine-specific update functions
 pub mod machine {
     use super::*;
     use std::path::Path;
 
-    /// Get the install directory for the cocoon binary
     pub fn get_install_dir() -> Result<PathBuf, String> {
         // Try to get from current exe location
         if let Ok(exe_path) = std::env::current_exe() {
@@ -375,13 +346,11 @@ pub mod machine {
         Ok(PathBuf::from(format!("{}/.local/bin", home)))
     }
 
-    /// Download and install the latest binary
     pub fn update_binary() -> Result<String, String> {
         let install_dir = get_install_dir()?;
 
         out_info!("  Install directory: {}", install_dir.display());
 
-        // Ensure install directory exists
         if !install_dir.exists() {
             std::fs::create_dir_all(&install_dir)
                 .map_err(|e| format!("Failed to create install directory: {}", e))?;
@@ -390,7 +359,6 @@ pub mod machine {
         download_latest_binary(&install_dir)
     }
 
-    /// Update and restart the service
     pub fn update_and_restart() -> Result<String, String> {
         out_info!("Updating cocoon binary...");
         let update_result = update_binary()?;
@@ -466,7 +434,6 @@ pub mod machine {
     }
 }
 
-/// Format update check result for display
 pub fn format_check_result(result: &UpdateCheckResult) -> String {
     KeyValue::new()
         .entry("Current version", &result.current_version)

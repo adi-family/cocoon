@@ -1,16 +1,10 @@
-//! Plugin handler — processes typed `plugin_*` protocol messages.
-//!
-//! Installs ADI plugins on the cocoon by shelling out to the `adi` CLI.
-
 use crate::protocol::messages::CocoonMessage;
 use tokio::process::Command;
 
-/// Resolve the path to the `adi` binary.
 fn adi_binary() -> String {
     std::env::var("ADI_BIN").unwrap_or_else(|_| "adi".to_string())
 }
 
-/// Handle a `PluginInstallPlugin` message and return the response.
 pub async fn handle_install(
     request_id: String,
     plugin_id: String,

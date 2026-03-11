@@ -1,8 +1,3 @@
-//! Knowledgebase Service - ADI service implementation for knowledge management
-//!
-//! Provides semantic search, graph DB operations, and knowledge management
-//! via the ADI service protocol.
-
 use crate::adi_router::{
     AdiCallerContext, AdiHandleResult, AdiService, AdiServiceError, SubscriptionEvent, SubscriptionEventInfo,
 };
@@ -19,17 +14,12 @@ fn json_to_bytes(value: JsonValue) -> Bytes {
     Bytes::from(serde_json::to_vec(&value).unwrap())
 }
 
-/// Knowledgebase service for ADI router
-///
-/// Wraps knowledgebase-core and exposes semantic search, node CRUD,
-/// edge management, and conflict detection as an ADI service.
 pub struct KnowledgebaseService {
     kb: Arc<Mutex<Knowledgebase>>,
     event_tx: broadcast::Sender<SubscriptionEvent>,
 }
 
 impl KnowledgebaseService {
-    /// Create a new knowledgebase service using default data directory with fastembed
     pub async fn new() -> Result<Self, String> {
         let data_dir = kb_core::default_data_dir();
         #[allow(deprecated)]

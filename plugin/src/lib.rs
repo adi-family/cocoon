@@ -94,8 +94,6 @@ env_vars! {
 
 use lib_plugin_prelude::*;
 
-// === CLI Args ===
-
 #[derive(CliArgs)]
 pub struct NameArg {
     #[arg(position = 0)]
@@ -434,8 +432,6 @@ impl CliCommands for CocoonPlugin {
         }
     }
 }
-
-// === Command Handlers ===
 
 impl CocoonPlugin {
     #[command(name = "list", description = "List all cocoons")]

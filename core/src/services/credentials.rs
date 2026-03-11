@@ -7,16 +7,12 @@ use credentials_core::{
 use sqlx::PgPool;
 use uuid::Uuid;
 
-/// Credentials service for ADI router.
-///
-/// Provides secure credential storage and retrieval over WebRTC.
 pub struct CredentialsService {
     db: PgPool,
     secrets: SecretManager,
 }
 
 impl CredentialsService {
-    /// Initialize from environment configuration.
     pub async fn from_env() -> Result<Self, String> {
         let config = Config::from_env().map_err(|e| format!("Config error: {e}"))?;
 

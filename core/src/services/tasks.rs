@@ -1,15 +1,3 @@
-//! Tasks Service - ADI service implementation for task management
-//!
-//! Provides task CRUD operations, dependency management, and search
-//! functionality via the ADI service protocol.
-//!
-//! ## MCP-Style Features
-//!
-//! - Full JSON Schema for all methods (params and results)
-//! - Service capabilities declaration
-//! - Subscription support for real-time task events
-//! - Notifications for task lifecycle events
-
 use crate::adi_router::{
     AdiCallerContext, AdiHandleResult, AdiService, AdiServiceError, SubscriptionEvent, SubscriptionEventInfo,
 };
@@ -26,13 +14,8 @@ fn json_to_bytes(value: JsonValue) -> Bytes {
     Bytes::from(serde_json::to_vec(&value).unwrap())
 }
 
-/// Tasks service for ADI router
-///
-/// Wraps TaskManager and provides it as an ADI service with full
-/// MCP-style capabilities including subscriptions and notifications.
 pub struct TasksService {
     manager: Arc<Mutex<TaskManager>>,
-    /// Broadcast channel for task events
     event_tx: broadcast::Sender<SubscriptionEvent>,
 }
 
@@ -159,7 +142,6 @@ impl TasksService {
 
         let old_status = task.status;
 
-        // Update fields if provided
         if let Some(title) = params.get("title").and_then(|v| v.as_str()) {
             task.title = title.to_string();
         }
@@ -172,7 +154,6 @@ impl TasksService {
                 .map_err(|_| AdiServiceError::invalid_params("invalid status"))?;
         }
 
-        // Update timestamp
         task.updated_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -182,10 +163,8 @@ impl TasksService {
             .update_task(&task)
             .map_err(|e| AdiServiceError::internal(e.to_string()))?;
 
-        // Broadcast appropriate events
         self.broadcast_event("task_updated", Self::task_to_json(&task));
-        
-        // Broadcast status change if status changed
+
         if old_status != task.status {
             self.broadcast_event("task_status_changed", json!({
                 "task_id": task_id,
@@ -212,7 +191,6 @@ impl TasksService {
             .delete_task(TaskId::new(task_id))
             .map_err(|e| AdiServiceError::internal(e.to_string()))?;
 
-        // Broadcast delete event
         self.broadcast_event("task_deleted", json!({
             "task_id": task_id,
             "title": task_info.as_ref().map(|t| t.title.as_str())
@@ -679,7 +657,6 @@ impl AdiService for TasksService {
         event: &str,
         _filter: Option<JsonValue>,
     ) -> Result<broadcast::Receiver<SubscriptionEvent>, AdiServiceError> {
-        // Validate event name
         let valid_events = ["task_created", "task_updated", "task_deleted", "task_status_changed", "*"];
         if !valid_events.contains(&event) {
             return Err(AdiServiceError::invalid_params(format!(

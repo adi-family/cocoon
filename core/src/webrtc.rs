@@ -51,12 +51,6 @@ env_vars! {
     WebrtcTurnCredential => "WEBRTC_TURN_CREDENTIAL",
 }
 
-/// Build ICE server configuration from environment variables
-///
-/// Environment variables:
-/// - `WEBRTC_ICE_SERVERS`: Comma-separated list of STUN/TURN URLs
-/// - `WEBRTC_TURN_USERNAME`: Username for TURN authentication
-/// - `WEBRTC_TURN_CREDENTIAL`: Credential for TURN authentication
 fn build_ice_servers() -> Vec<RTCIceServer> {
     let ice_servers_env = env_opt(EnvVar::WebrtcIceServers.as_str());
     let turn_username = env_opt(EnvVar::WebrtcTurnUsername.as_str());
@@ -68,7 +62,6 @@ fn build_ice_servers() -> Vec<RTCIceServer> {
         .unwrap_or_default();
 
     if urls.is_empty() {
-        // Default to Google's public STUN server
         tracing::info!("No WEBRTC_ICE_SERVERS configured, using default Google STUN server");
         return vec![RTCIceServer {
             urls: vec!["stun:stun.l.google.com:19302".to_string()],
@@ -76,13 +69,11 @@ fn build_ice_servers() -> Vec<RTCIceServer> {
         }];
     }
 
-    // Separate STUN and TURN servers
     let stun_urls: Vec<String> = urls.iter().filter(|u| u.starts_with("stun:")).cloned().collect();
     let turn_urls: Vec<String> = urls.iter().filter(|u| u.starts_with("turn:") || u.starts_with("turns:")).cloned().collect();
 
     let mut ice_servers = Vec::new();
 
-    // Add STUN servers (no auth needed)
     if !stun_urls.is_empty() {
         tracing::info!("Configured {} STUN server(s): {:?}", stun_urls.len(), stun_urls);
         ice_servers.push(RTCIceServer {
@@ -91,7 +82,6 @@ fn build_ice_servers() -> Vec<RTCIceServer> {
         });
     }
 
-    // Add TURN servers (with auth if provided)
     if !turn_urls.is_empty() {
         let has_credentials = turn_username.is_some() && turn_credential.is_some();
         tracing::info!(
@@ -109,7 +99,6 @@ fn build_ice_servers() -> Vec<RTCIceServer> {
         });
     }
 
-    // If we somehow ended up with an empty list, add default STUN
     if ice_servers.is_empty() {
         tracing::warn!("No valid ICE servers found, falling back to default Google STUN");
         ice_servers.push(RTCIceServer {
@@ -121,7 +110,6 @@ fn build_ice_servers() -> Vec<RTCIceServer> {
     ice_servers
 }
 
-/// PTY session for interactive silk commands over WebRTC data channel
 struct SilkPtySession {
     id: Uuid,
     pair: portable_pty::PtyPair,
@@ -130,7 +118,6 @@ struct SilkPtySession {
     writer: Box<dyn std::io::Write + Send>,
 }
 
-/// Shared state for silk data channel sessions
 struct SilkDcState {
     silk_sessions: Mutex<HashMap<String, SilkSession>>,
     pty_sessions: Mutex<HashMap<String, SilkPtySession>>,
@@ -145,28 +132,22 @@ impl SilkDcState {
     }
 }
 
-/// WebRTC session state
 pub struct WebRtcSession {
     pub session_id: String,
     pub peer_connection: Arc<RTCPeerConnection>,
     pub data_channels: HashMap<String, Arc<RTCDataChannel>>,
     pub state: String,
-    /// Authenticated user_id of the peer who initiated this connection
     pub user_id: Option<String>,
 }
 
-/// WebRTC session manager
 pub struct WebRtcManager {
     sessions: Arc<Mutex<HashMap<String, WebRtcSession>>>,
     signaling_tx: mpsc::UnboundedSender<SignalingMessage>,
-    /// Timeout for closing peer connections (default: 5 seconds)
     close_timeout: std::time::Duration,
-    /// ADI service router for handling "adi" channel requests
     adi_router: Option<Arc<Mutex<AdiRouter>>>,
 }
 
 impl WebRtcManager {
-    /// Create a new WebRTC manager
     pub fn new(signaling_tx: mpsc::UnboundedSender<SignalingMessage>) -> Self {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -176,7 +157,6 @@ impl WebRtcManager {
         }
     }
 
-    /// Create a new WebRTC manager with ADI router
     pub fn with_adi_router(
         signaling_tx: mpsc::UnboundedSender<SignalingMessage>,
         adi_router: Arc<Mutex<AdiRouter>>,
@@ -189,7 +169,6 @@ impl WebRtcManager {
         }
     }
 
-    /// Create a new WebRTC manager with custom close timeout
     #[cfg(test)]
     pub fn with_close_timeout(
         signaling_tx: mpsc::UnboundedSender<SignalingMessage>,
@@ -203,7 +182,6 @@ impl WebRtcManager {
         }
     }
 
-    /// Create a new WebRTC peer connection for a session
     pub async fn create_session(&self, session_id: String, user_id: Option<String>) -> Result<(), String> {
         tracing::info!("🔧 [create_session] START session_id={}", session_id);
         tracing::info!("🔧 [create_session] current session count: {}", self.sessions.lock().await.len());
@@ -215,10 +193,8 @@ impl WebRtcManager {
             ..Default::default()
         };
 
-        // Create a MediaEngine
         let mut media_engine = MediaEngine::default();
 
-        // Create an interceptor registry
         let mut registry = Registry::new();
         registry = register_default_interceptors(registry, &mut media_engine)
             .map_err(|e| format!("Failed to register interceptors: {}", e))?;
@@ -226,7 +202,6 @@ impl WebRtcManager {
         let setting_engine = SettingEngine::default();
         tracing::info!("🔧 [create_session] SettingEngine created (default, no detach_data_channels)");
 
-        // Create the API
         let api = APIBuilder::new()
             .with_media_engine(media_engine)
             .with_interceptor_registry(registry)
@@ -235,7 +210,6 @@ impl WebRtcManager {
 
         tracing::info!("🔧 [create_session] API built, creating peer connection...");
 
-        // Create the peer connection
         let peer_connection = api
             .new_peer_connection(config)
             .await
@@ -244,7 +218,6 @@ impl WebRtcManager {
         tracing::info!("🔧 [create_session] peer connection created successfully");
         let peer_connection = Arc::new(peer_connection);
 
-        // Set up ICE candidate handler
         let session_id_clone = session_id.clone();
         let signaling_tx_clone = self.signaling_tx.clone();
         peer_connection.on_ice_candidate(Box::new(move |candidate| {
@@ -254,7 +227,6 @@ impl WebRtcManager {
             Box::pin(async move {
                 if let Some(c) = candidate {
                     if let Ok(json) = c.to_json() {
-                        // Log ICE candidate type for debugging connectivity issues
                         let candidate_type = if json.candidate.contains("typ host") {
                             "host"
                         } else if json.candidate.contains("typ srflx") {
@@ -292,13 +264,11 @@ impl WebRtcManager {
                         });
                     }
                 } else {
-                    // End of ICE gathering
                     tracing::debug!("🧊 ICE gathering complete for session {}", session_id);
                 }
             })
         }));
 
-        // Set up ICE gathering state handler for debugging
         let session_id_clone = session_id.clone();
         peer_connection.on_ice_gathering_state_change(Box::new(move |state| {
             let session_id = session_id_clone.clone();
@@ -311,7 +281,6 @@ impl WebRtcManager {
             })
         }));
 
-        // Set up ICE connection state handler for debugging
         let session_id_clone = session_id.clone();
         peer_connection.on_ice_connection_state_change(Box::new(move |state| {
             let session_id = session_id_clone.clone();
@@ -324,7 +293,6 @@ impl WebRtcManager {
             })
         }));
 
-        // Set up connection state handler
         let session_id_clone = session_id.clone();
         let signaling_tx_clone = self.signaling_tx.clone();
         let sessions_clone = self.sessions.clone();
@@ -391,7 +359,6 @@ impl WebRtcManager {
         // Per-session silk state (outlives individual data channel handler calls)
         let silk_state = SilkDcState::new();
 
-        // Set up data channel handler
         let session_id_clone = session_id.clone();
         let signaling_tx_clone = self.signaling_tx.clone();
         let sessions_clone = self.sessions.clone();
@@ -416,12 +383,10 @@ impl WebRtcManager {
                     dc.ready_state(),
                 );
 
-                // Store the data channel
                 if let Some(session) = sessions.lock().await.get_mut(&session_id) {
                     session.data_channels.insert(dc_label.clone(), dc.clone());
                 }
 
-                // Set up message handler
                 let dc_label_clone = dc_label.clone();
                 let session_id_clone = session_id.clone();
                 let tx_clone = tx.clone();
@@ -444,7 +409,6 @@ impl WebRtcManager {
                             session_id, channel, msg.data.len(), msg.is_string
                         );
 
-                        // Handle binary frames on "adi" channel (service requests)
                         if channel == "adi" && !msg.is_string {
                             if let Some(router) = &adi_router {
                                 tracing::debug!("📦 ADI binary request received: {} bytes", msg.data.len());
@@ -503,7 +467,6 @@ impl WebRtcManager {
                             (base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &msg.data), true)
                         };
 
-                        // Handle "silk" channel for terminal sessions
                         if channel == "silk" {
                             tracing::info!("🧵 [DC-MSG] Silk message received: {} bytes, preview={}", data.len(), &data[..data.len().min(200)]);
                             match serde_json::from_str::<CocoonMessage>(&data) {
@@ -520,20 +483,13 @@ impl WebRtcManager {
                             return;
                         }
 
-                        // Handle "file" channel for filesystem operations
                         if channel == "file" {
                             tracing::debug!("📁 File system request received: {} bytes", data.len());
-                            
-                            // Parse the request
                             match serde_json::from_str::<FileSystemRequest>(&data) {
                                 Ok(request) => {
-                                    // Handle the filesystem request
                                     let response = handle_fs_request(request).await;
-                                    
-                                    // Serialize response
                                     match serde_json::to_string(&response) {
                                         Ok(response_json) => {
-                                            // Send response back through the data channel
                                             let response_len = response_json.len();
                                             if let Err(e) = dc_for_response.send(&response_json.into_bytes().into()).await {
                                                 tracing::error!("❌ Failed to send filesystem response: {}", e);
@@ -548,7 +504,6 @@ impl WebRtcManager {
                                 }
                                 Err(e) => {
                                     tracing::warn!("⚠️ Invalid filesystem request: {}", e);
-                                    // Send error response
                                     let error_response = serde_json::json!({
                                         "type": "fs_error",
                                         "request_id": "",
@@ -563,7 +518,6 @@ impl WebRtcManager {
                             return;
                         }
 
-                        // Handle "plugin" typed protocol messages on the adi channel
                         if channel == "adi" {
                             if let Ok(cocoon_msg) = serde_json::from_str::<CocoonMessage>(&data) {
                                 if let CocoonMessage::PluginInstallPlugin { request_id, plugin_id, registry, version } = cocoon_msg {
@@ -579,10 +533,8 @@ impl WebRtcManager {
                             }
                         }
 
-                        // Handle "adi" channel text frames (discovery + subscriptions)
                         if channel == "adi" {
                             if let Some(router) = &adi_router {
-                                // Try to parse as discovery request
                                 if let Ok(discovery) = serde_json::from_str::<AdiDiscovery>(&data) {
                                     let router_guard = router.lock().await;
                                     let response = router_guard.handle_discovery(discovery);
@@ -617,7 +569,6 @@ impl WebRtcManager {
                             return;
                         }
 
-                        // Forward other channels through signaling (for processing)
                         let _ = tx.send(SignalingMessage::SyncData {
                             payload: serde_json::to_value(&CocoonMessage::WebrtcData {
                                 session_id,
@@ -647,7 +598,6 @@ impl WebRtcManager {
         Ok(())
     }
 
-    /// Handle an incoming SDP offer and create an answer
     pub async fn handle_offer(&self, session_id: &str, sdp: &str) -> Result<String, String> {
         tracing::info!("📥 [handle_offer] START session_id={} sdp_len={}", session_id, sdp.len());
 
@@ -671,7 +621,6 @@ impl WebRtcManager {
             // lock dropped here
         };
 
-        // Parse the offer
         let offer = RTCSessionDescription::offer(sdp.to_string())
             .map_err(|e| format!("Failed to parse SDP offer: {}", e))?;
         tracing::info!("📥 [handle_offer] SDP offer parsed successfully");
@@ -683,7 +632,6 @@ impl WebRtcManager {
             .map_err(|e| format!("Failed to set remote description: {}", e))?;
         tracing::info!("📥 [handle_offer] remote description set OK");
 
-        // Create answer
         tracing::info!("📥 [handle_offer] creating answer...");
         let answer = pc
             .create_answer(None)
@@ -691,7 +639,6 @@ impl WebRtcManager {
             .map_err(|e| format!("Failed to create answer: {}", e))?;
         tracing::info!("📥 [handle_offer] answer created, sdp_len={}", answer.sdp.len());
 
-        // Set local description
         tracing::info!("📥 [handle_offer] setting local description...");
         pc.set_local_description(answer.clone())
             .await
@@ -701,7 +648,6 @@ impl WebRtcManager {
         Ok(answer.sdp)
     }
 
-    /// Add an ICE candidate from remote peer
     pub async fn add_ice_candidate(
         &self,
         session_id: &str,
@@ -709,7 +655,6 @@ impl WebRtcManager {
         sdp_mid: Option<&str>,
         sdp_mline_index: Option<u32>,
     ) -> Result<(), String> {
-        // Log remote ICE candidate for debugging
         let candidate_type = if candidate.contains("typ host") {
             "host"
         } else if candidate.contains("typ srflx") {
@@ -759,7 +704,6 @@ impl WebRtcManager {
         Ok(())
     }
 
-    /// Send data through a data channel
     pub async fn send_data(
         &self,
         session_id: &str,
@@ -826,7 +770,6 @@ impl WebRtcManager {
         Ok(())
     }
 
-    /// Get the list of active sessions
     pub async fn list_sessions(&self) -> Vec<String> {
         self.sessions
             .lock()
@@ -836,17 +779,14 @@ impl WebRtcManager {
             .collect()
     }
 
-    /// Get the number of active sessions
     pub async fn session_count(&self) -> usize {
         self.sessions.lock().await.len()
     }
 
-    /// Check if a session exists
     pub async fn session_exists(&self, session_id: &str) -> bool {
         self.sessions.lock().await.contains_key(session_id)
     }
 
-    /// Get session state
     pub async fn get_session_state(&self, session_id: &str) -> Option<String> {
         self.sessions
             .lock()
@@ -856,7 +796,6 @@ impl WebRtcManager {
     }
 }
 
-/// Send a CocoonMessage back through a silk data channel
 async fn dc_send(dc: &RTCDataChannel, msg: &CocoonMessage) {
     match serde_json::to_string(msg) {
         Ok(json) => {
@@ -876,7 +815,6 @@ async fn dc_send(dc: &RTCDataChannel, msg: &CocoonMessage) {
     }
 }
 
-/// Handle a message received on the "silk" WebRTC data channel
 async fn handle_silk_dc_msg(
     msg: CocoonMessage,
     state: Arc<SilkDcState>,
@@ -948,12 +886,10 @@ async fn handle_silk_dc_msg(
 
                                 match pair.slave.spawn_command(cmd) {
                                     Ok(child) => {
-                                        // Update silk session with pty id
                                         if let Some(s) = state_for_pty.silk_sessions.lock().await.get_mut(&session_id) {
                                             s.set_pty_session(command_id.clone(), pty_id);
                                         }
 
-                                        // Spawn pty output reader
                                         let mut reader = pair.master.try_clone_reader().unwrap();
                                         let session_id_for_pty = session_id.clone();
                                         let command_id_for_pty = command_id.clone();
@@ -1106,7 +1042,6 @@ async fn handle_silk_dc_msg(
         }
 
         CocoonMessage::SilkInput { session_id, command_id, data } => {
-            // Forward input to PTY writer keyed by command_id
             let mut pty_sessions = state.pty_sessions.lock().await;
             if let Some(pty) = pty_sessions.get_mut(&command_id) {
                 if let Err(e) = std::io::Write::write_all(&mut pty.writer, data.as_bytes()) {
@@ -1153,12 +1088,8 @@ mod tests {
     use super::*;
     use tokio::sync::mpsc;
 
-    /// Helper to create a WebRtcManager for testing
-    /// Uses a short close timeout (100ms) to speed up tests
     fn create_test_manager() -> (WebRtcManager, mpsc::UnboundedReceiver<SignalingMessage>) {
         let (tx, rx) = mpsc::unbounded_channel();
-        // Use very short timeout for tests - close() will timeout but that's fine
-        // since we're just testing the session management logic
         let manager =
             WebRtcManager::with_close_timeout(tx, std::time::Duration::from_millis(100));
         (manager, rx)
@@ -1179,7 +1110,6 @@ mod tests {
     async fn test_create_multiple_sessions_sequentially() {
         let (manager, _rx) = create_test_manager();
 
-        // Create 5 sessions sequentially
         for i in 1..=5 {
             let session_id = format!("session-{}", i);
             let result = manager.create_session(session_id.clone(), None).await;
@@ -1194,7 +1124,6 @@ mod tests {
 
         assert_eq!(manager.session_count().await, 5);
 
-        // Verify all sessions exist
         let sessions = manager.list_sessions().await;
         for i in 1..=5 {
             assert!(
@@ -1210,7 +1139,6 @@ mod tests {
         let (manager, _rx) = create_test_manager();
         let manager = Arc::new(manager);
 
-        // Create 10 sessions concurrently
         let mut handles = vec![];
         for i in 1..=10 {
             let manager_clone = manager.clone();
@@ -1221,10 +1149,7 @@ mod tests {
             handles.push(handle);
         }
 
-        // Wait for all to complete
         let results: Vec<_> = futures::future::join_all(handles).await;
-
-        // All should succeed
         for (i, result) in results.into_iter().enumerate() {
             let inner_result = result.expect("Task panicked");
             assert!(
@@ -1242,20 +1167,17 @@ mod tests {
     async fn test_close_session_and_cleanup() {
         let (manager, _rx) = create_test_manager();
 
-        // Create a session
         manager
             .create_session("session-to-close".to_string(), None)
             .await
             .expect("Failed to create session");
         assert!(manager.session_exists("session-to-close").await);
 
-        // Close it
         manager
             .close_session("session-to-close")
             .await
             .expect("Failed to close session");
 
-        // Verify it's removed
         assert!(!manager.session_exists("session-to-close").await);
         assert_eq!(manager.session_count().await, 0);
     }
@@ -1264,21 +1186,18 @@ mod tests {
     async fn test_recreate_session_after_close() {
         let (manager, _rx) = create_test_manager();
 
-        // Create initial session
         manager
             .create_session("recyclable-session".to_string(), None)
             .await
             .expect("Failed to create initial session");
         assert!(manager.session_exists("recyclable-session").await);
 
-        // Close it
         manager
             .close_session("recyclable-session")
             .await
             .expect("Failed to close session");
         assert!(!manager.session_exists("recyclable-session").await);
 
-        // Recreate with same ID - THIS IS THE KEY TEST FOR THE BUG
         let result = manager
             .create_session("recyclable-session".to_string(), None)
             .await;
@@ -1294,7 +1213,6 @@ mod tests {
     async fn test_session_lifecycle_multiple_cycles() {
         let (manager, _rx) = create_test_manager();
 
-        // Run 5 create-close cycles on the same session ID
         for cycle in 1..=5 {
             let result = manager
                 .create_session("lifecycle-test".to_string(), None)
@@ -1327,7 +1245,6 @@ mod tests {
     async fn test_close_nonexistent_session() {
         let (manager, _rx) = create_test_manager();
 
-        // Should not error on closing non-existent session
         let result = manager.close_session("nonexistent").await;
         assert!(result.is_ok());
     }
@@ -1336,7 +1253,6 @@ mod tests {
     async fn test_multiple_sessions_independent_lifecycle() {
         let (manager, _rx) = create_test_manager();
 
-        // Create 3 sessions
         manager
             .create_session("session-a".to_string(), None)
             .await
@@ -1352,19 +1268,16 @@ mod tests {
 
         assert_eq!(manager.session_count().await, 3);
 
-        // Close middle session
         manager
             .close_session("session-b")
             .await
             .expect("Failed to close session-b");
 
-        // Verify others still exist
         assert!(manager.session_exists("session-a").await);
         assert!(!manager.session_exists("session-b").await);
         assert!(manager.session_exists("session-c").await);
         assert_eq!(manager.session_count().await, 2);
 
-        // Recreate session-b
         manager
             .create_session("session-b".to_string(), None)
             .await
@@ -1400,7 +1313,6 @@ mod tests {
         let (manager, _rx) = create_test_manager();
         let manager = Arc::new(manager);
 
-        // Simulate rapid page refresh scenario - 20 rapid cycles
         for i in 1..=20 {
             let result = manager.create_session(format!("rapid-{}", i), None).await;
             assert!(
@@ -1410,14 +1322,12 @@ mod tests {
                 result
             );
 
-            // Immediately close
             manager
                 .close_session(&format!("rapid-{}", i))
                 .await
                 .expect(&format!("Rapid cycle {}: close failed", i));
         }
 
-        // All should be cleaned up
         assert_eq!(manager.session_count().await, 0);
     }
 
@@ -1426,7 +1336,6 @@ mod tests {
         let (manager, _rx) = create_test_manager();
         let manager = Arc::new(manager);
 
-        // Create 10 sessions
         for i in 1..=10 {
             manager
                 .create_session(format!("cc-session-{}", i), None)
@@ -1434,10 +1343,8 @@ mod tests {
                 .expect("Failed to create session");
         }
 
-        // Concurrently close half and create new ones
         let mut handles = vec![];
 
-        // Close odd sessions
         for i in (1..=10).step_by(2) {
             let manager_clone = manager.clone();
             let handle = tokio::spawn(async move {
@@ -1448,7 +1355,6 @@ mod tests {
             handles.push(handle);
         }
 
-        // Create new sessions
         for i in 11..=15 {
             let manager_clone = manager.clone();
             let handle = tokio::spawn(async move {
@@ -1459,10 +1365,7 @@ mod tests {
             handles.push(handle);
         }
 
-        // Wait for all
         let results: Vec<_> = futures::future::join_all(handles).await;
-
-        // All operations should succeed
         for result in results {
             let inner = result.expect("Task panicked");
             assert!(inner.is_ok(), "Operation failed: {:?}", inner);
@@ -1476,17 +1379,14 @@ mod tests {
     async fn test_duplicate_session_id_overwrites() {
         let (manager, _rx) = create_test_manager();
 
-        // Create session
         manager
             .create_session("duplicate-test".to_string(), None)
             .await
             .expect("Failed to create first session");
 
-        // Create again with same ID (should overwrite)
         let result = manager.create_session("duplicate-test".to_string(), None).await;
         assert!(result.is_ok(), "Second create should succeed");
 
-        // Should still be just 1 session
         assert_eq!(manager.session_count().await, 1);
     }
 
@@ -1526,7 +1426,6 @@ mod tests {
         let (manager, _rx) = create_test_manager();
         let manager = Arc::new(manager);
 
-        // Create 50 sessions concurrently
         let mut handles = vec![];
         for i in 1..=50 {
             let manager_clone = manager.clone();
@@ -1548,7 +1447,6 @@ mod tests {
         assert_eq!(success_count, 50, "All 50 sessions should be created");
         assert_eq!(manager.session_count().await, 50);
 
-        // Now close all 50 concurrently
         let mut close_handles = vec![];
         for i in 1..=50 {
             let manager_clone = manager.clone();

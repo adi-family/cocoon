@@ -1,12 +1,3 @@
-//! Tools Service - ADI service for tool execution
-//!
-//! Provides a unified interface for executing tools from various sources:
-//! - Built-in tools (shell, file operations, etc.)
-//! - MCP servers (via stdio/SSE transport)
-//! - Custom tool providers
-//!
-//! Tools follow the MCP tool schema format with JSON Schema for parameters.
-
 use crate::adi_router::{AdiCallerContext, AdiHandleResult, AdiService, AdiServiceError};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -30,13 +21,10 @@ pub struct ToolDef {
     /// Unique tool name (e.g., "shell_execute", "file_read")
     pub name: String,
 
-    /// Human-readable description
     pub description: String,
 
-    /// JSON Schema for tool parameters
     pub input_schema: JsonValue,
 
-    /// Tool category for organization
     #[serde(default)]
     pub category: ToolCategory,
 
@@ -45,19 +33,15 @@ pub struct ToolDef {
     pub source: String,
 }
 
-/// Tool execution result
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
     /// Result content (text or JSON string)
     pub content: String,
 
-    /// Content type
     pub content_type: ToolContentType,
 
-    /// Whether this is an error result
     pub is_error: bool,
 
-    /// Execution duration in milliseconds
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
 }
@@ -130,9 +114,7 @@ pub trait ToolProvider: Send + Sync {
     }
 }
 
-/// Built-in shell tools
 pub struct ShellToolProvider {
-    /// Working directory for commands
     pub working_dir: Option<String>,
 }
 
@@ -273,7 +255,6 @@ impl ToolProvider for ShellToolProvider {
     }
 }
 
-/// Built-in file system tools
 pub struct FileSystemToolProvider {
     /// Base directory for file operations (sandbox)
     pub base_dir: Option<String>,
@@ -590,7 +571,6 @@ pub struct McpServerProvider {
 }
 
 impl McpServerProvider {
-    /// Create a new MCP server provider
     pub fn new(id: impl Into<String>, command: impl Into<String>, args: Vec<String>) -> Self {
         Self {
             id: id.into(),
@@ -602,7 +582,6 @@ impl McpServerProvider {
 
     /// Initialize the provider by querying the MCP server for tools
     pub async fn initialize(&self) -> Result<(), String> {
-        // Start the MCP server process
         let mut child = Command::new(&self.command)
             .args(&self.args)
             .stdin(Stdio::piped())
@@ -615,7 +594,6 @@ impl McpServerProvider {
         let stdout = child.stdout.take().ok_or("Failed to get stdout")?;
         let mut reader = BufReader::new(stdout);
 
-        // Send initialize request
         let init_request = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -635,14 +613,12 @@ impl McpServerProvider {
             .await
             .map_err(|e| e.to_string())?;
 
-        // Read initialize response
         let mut line = String::new();
         reader
             .read_line(&mut line)
             .await
             .map_err(|e| e.to_string())?;
 
-        // Send tools/list request
         let list_request = json!({
             "jsonrpc": "2.0",
             "id": 2,
@@ -655,7 +631,6 @@ impl McpServerProvider {
             .await
             .map_err(|e| e.to_string())?;
 
-        // Read tools/list response
         line.clear();
         reader
             .read_line(&mut line)
@@ -716,7 +691,6 @@ impl ToolProvider for McpServerProvider {
     }
 
     async fn call_tool(&self, name: &str, arguments: JsonValue) -> Result<ToolResult, String> {
-        // Start the MCP server process
         let mut child = Command::new(&self.command)
             .args(&self.args)
             .stdin(Stdio::piped())
@@ -729,7 +703,6 @@ impl ToolProvider for McpServerProvider {
         let stdout = child.stdout.take().ok_or("Failed to get stdout")?;
         let mut reader = BufReader::new(stdout);
 
-        // Send initialize request
         let init_request = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -749,14 +722,12 @@ impl ToolProvider for McpServerProvider {
             .await
             .map_err(|e| e.to_string())?;
 
-        // Read initialize response
         let mut line = String::new();
         reader
             .read_line(&mut line)
             .await
             .map_err(|e| e.to_string())?;
 
-        // Send tools/call request
         let call_request = json!({
             "jsonrpc": "2.0",
             "id": 2,
@@ -774,7 +745,6 @@ impl ToolProvider for McpServerProvider {
             .await
             .map_err(|e| e.to_string())?;
 
-        // Read tools/call response
         line.clear();
         reader
             .read_line(&mut line)
@@ -785,10 +755,8 @@ impl ToolProvider for McpServerProvider {
 
         let response: JsonValue = serde_json::from_str(&line).map_err(|e| e.to_string())?;
 
-        // Kill the process
         let _ = child.kill().await;
 
-        // Parse response
         if let Some(error) = response.get("error") {
             return Ok(ToolResult::error(
                 error
@@ -819,8 +787,6 @@ impl ToolProvider for McpServerProvider {
     }
 }
 
-/// Tools service for ADI router
-///
 /// Aggregates tools from multiple providers and exposes them via the ADI protocol.
 pub struct ToolsService {
     providers: Vec<Arc<dyn ToolProvider>>,
@@ -835,14 +801,12 @@ impl Default for ToolsService {
 }
 
 impl ToolsService {
-    /// Create a new tools service with default built-in providers
     pub fn new() -> Self {
         let mut service = Self {
             providers: Vec::new(),
             tool_to_provider: std::sync::RwLock::new(HashMap::new()),
         };
 
-        // Register built-in providers
         service.add_provider(Arc::new(ShellToolProvider::default()));
         service.add_provider(Arc::new(FileSystemToolProvider::default()));
 
@@ -857,12 +821,10 @@ impl ToolsService {
         }
     }
 
-    /// Add a tool provider
     pub fn add_provider(&mut self, provider: Arc<dyn ToolProvider>) {
         let provider_idx = self.providers.len();
         self.providers.push(provider.clone());
 
-        // Build tool -> provider index
         let tool_mapping: HashMap<String, usize> = provider
             .list_tools()
             .into_iter()
@@ -881,7 +843,6 @@ impl ToolsService {
         );
     }
 
-    /// Get all available tools
     pub fn list_all_tools(&self) -> Vec<ToolDef> {
         self.providers
             .iter()
@@ -931,7 +892,6 @@ impl ToolsService {
 
         let provider = &self.providers[provider_idx];
 
-        // Call the tool
         match provider.call_tool(name, arguments).await {
             Ok(result) => Ok(AdiHandleResult::Success(json_to_bytes(json!(result)))),
             Err(e) => Ok(AdiHandleResult::Success(json_to_bytes(json!(ToolResult::error(e))))),

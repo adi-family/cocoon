@@ -1,8 +1,3 @@
-//! File system operations for cocoon
-//!
-//! Provides file system browsing and reading capabilities over WebRTC data channels.
-//! Supports listing directories, reading files, getting file stats, and walking directory trees.
-
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::SystemTime;
@@ -114,27 +109,23 @@ pub struct WalkEntry {
     pub size: Option<u64>,
 }
 
-/// Convert SystemTime to ISO 8601 string
 fn system_time_to_string(time: SystemTime) -> Option<String> {
     time.duration_since(SystemTime::UNIX_EPOCH)
         .ok()
         .map(|d| {
             let secs = d.as_secs();
-            // Simple ISO 8601 format
             chrono::DateTime::from_timestamp(secs as i64, 0)
                 .map(|dt| dt.to_rfc3339())
                 .unwrap_or_else(|| format!("{}", secs))
         })
 }
 
-/// Check if content is likely binary
 fn is_binary_content(data: &[u8]) -> bool {
     // Check first 8KB for null bytes
     let check_len = std::cmp::min(data.len(), 8192);
     data[..check_len].contains(&0)
 }
 
-/// Common text file extensions
 const TEXT_EXTENSIONS: &[&str] = &[
     "txt", "md", "markdown", "json", "yaml", "yml", "toml", "xml", "html", "htm",
     "css", "scss", "sass", "less", "js", "jsx", "ts", "tsx", "mjs", "cjs",
@@ -146,7 +137,6 @@ const TEXT_EXTENSIONS: &[&str] = &[
     "lock", "log", "csv", "tsv", "ini", "cfg", "conf", "config",
 ];
 
-/// Check if file is likely a text file based on extension
 fn is_text_file(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
@@ -190,10 +180,6 @@ async fn list_directory(request_id: &str, path: &str) -> FileSystemResponse {
         Ok(mut dir) => {
             while let Ok(Some(entry)) = dir.next_entry().await {
                 let name = entry.file_name().to_string_lossy().to_string();
-                
-                // Skip hidden files starting with . (optional, can be configurable)
-                // For now, include all files
-                
                 match entry.metadata().await {
                     Ok(metadata) => {
                         let file_type = entry.file_type().await.ok();
@@ -263,7 +249,6 @@ async fn read_file(
     
     tracing::debug!("Reading file: {} (offset: {:?}, limit: {:?})", path, offset, limit);
 
-    // Get file metadata first
     let metadata = match fs::metadata(file_path).await {
         Ok(m) => m,
         Err(e) => {
@@ -287,24 +272,18 @@ async fn read_file(
     let offset = offset.unwrap_or(0);
     let limit = limit.unwrap_or(1024 * 1024); // Default 1MB limit
 
-    // Read file content
     match fs::read(file_path).await {
         Ok(content) => {
-            // Apply offset and limit
             let start = std::cmp::min(offset as usize, content.len());
             let end = std::cmp::min(start + limit as usize, content.len());
             let slice = &content[start..end];
 
-            // Determine if content should be base64 encoded
             let (encoded_content, encoding) = if is_binary_content(slice) || !is_text_file(file_path) {
-                // Binary content - use base64
                 (base64::Engine::encode(&base64::engine::general_purpose::STANDARD, slice), "base64".to_string())
             } else {
-                // Text content - try UTF-8
                 match String::from_utf8(slice.to_vec()) {
                     Ok(text) => (text, "utf8".to_string()),
                     Err(_) => {
-                        // Fallback to base64 if not valid UTF-8
                         (base64::Engine::encode(&base64::engine::general_purpose::STANDARD, slice), "base64".to_string())
                     }
                 }
@@ -385,7 +364,6 @@ async fn walk_directory(
     let mut entries = Vec::new();
     let mut truncated = false;
 
-    // Compile glob pattern if provided
     let glob_pattern = pattern.as_ref().and_then(|p| glob::Pattern::new(p).ok());
 
     let walker = WalkDir::new(dir_path)
@@ -415,7 +393,6 @@ async fn walk_directory(
                     continue;
                 }
 
-                // Apply pattern filter if provided
                 if let Some(ref pattern) = glob_pattern {
                     let name = e.file_name().to_string_lossy();
                     if !pattern.matches(&name) {
@@ -450,7 +427,6 @@ async fn walk_directory(
     }
 }
 
-/// Convert IO error to error code
 fn error_code(error: &std::io::Error) -> String {
     match error.kind() {
         std::io::ErrorKind::NotFound => "not_found".to_string(),

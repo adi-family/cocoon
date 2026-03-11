@@ -1,7 +1,3 @@
-//! Runtime abstraction for different cocoon backends.
-//!
-//! Supports Docker containers and Machine (native systemd/launchd) services.
-
 use crate::self_update;
 use lib_console_output::{out_info, KeyValue, Renderable};
 use std::fmt;
@@ -296,17 +292,14 @@ impl Runtime for DockerRuntime {
     fn update(&self, name: &str) -> Result<String, String> {
         out_info!("Updating Docker cocoon '{}'...", name);
 
-        // Check if container exists
         let _ = self.status(name)?;
 
-        // Pull latest image
         let updated = self_update::docker::pull_latest_image("latest")?;
 
         if !updated {
             return Ok("Already running the latest image.".to_string());
         }
 
-        // Recreate container with new image
         let result = self_update::docker::recreate_container(name, "latest")?;
 
         Ok(format!(
@@ -318,7 +311,6 @@ impl Runtime for DockerRuntime {
     fn check_update(&self, name: &str) -> Result<String, String> {
         out_info!("Checking for updates for Docker cocoon '{}'...", name);
 
-        // Check if container exists
         let info = self.status(name)?;
 
         let (needs_update, details) = self_update::docker::check_for_updates("latest")?;
@@ -574,7 +566,6 @@ impl RuntimeManager {
     }
 
     pub fn find_cocoon(&self, name: &str) -> Option<(CocoonInfo, RuntimeType)> {
-        // Check Docker first
         if self.docker.is_available() {
             if let Ok(info) = self.docker.status(name) {
                 return Some((info, RuntimeType::Docker));

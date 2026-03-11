@@ -8,7 +8,6 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Request header parsed from the JSON portion of an incoming frame.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestHeader {
     /// Protocol version (currently 1)
@@ -17,28 +16,23 @@ pub struct RequestHeader {
     pub id: Uuid,
     /// Target plugin (e.g. "adi.credentials")
     pub plugin: String,
-    /// Method to invoke on the plugin
     pub method: String,
     /// Whether the client expects a streaming response
     #[serde(default)]
     pub stream: bool,
 }
 
-/// Response header serialized into the JSON portion of an outgoing frame.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResponseHeader {
     /// Protocol version (currently 1)
     pub v: u8,
-    /// Request identifier this response correlates to
     pub id: Uuid,
-    /// Outcome status
     pub status: ResponseStatus,
     /// Sequence number for streaming (0 for single responses)
     #[serde(default)]
     pub seq: u32,
 }
 
-/// Response status values.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResponseStatus {
@@ -51,7 +45,6 @@ pub enum ResponseStatus {
     InvalidRequest,
 }
 
-/// Errors that can occur when parsing a frame.
 #[derive(Debug)]
 pub enum FrameError {
     TooShort,
@@ -100,7 +93,6 @@ pub fn parse_request(data: &[u8]) -> Result<(RequestHeader, Bytes), FrameError> 
     Ok((header, payload))
 }
 
-/// Build a binary response frame from a header and opaque payload.
 pub fn build_response(header: &ResponseHeader, payload: &[u8]) -> Bytes {
     let header_json = serde_json::to_vec(header).expect("ResponseHeader is always serializable");
     let mut buf = BytesMut::with_capacity(4 + header_json.len() + payload.len());
@@ -110,7 +102,6 @@ pub fn build_response(header: &ResponseHeader, payload: &[u8]) -> Bytes {
     buf.freeze()
 }
 
-/// Build a success response frame.
 pub fn success_response(request_id: Uuid, payload: &[u8]) -> Bytes {
     build_response(
         &ResponseHeader { v: 1, id: request_id, status: ResponseStatus::Success, seq: 0 },
@@ -118,7 +109,6 @@ pub fn success_response(request_id: Uuid, payload: &[u8]) -> Bytes {
     )
 }
 
-/// Build an error response frame from a plugin error.
 pub fn error_response(request_id: Uuid, payload: &[u8]) -> Bytes {
     build_response(
         &ResponseHeader { v: 1, id: request_id, status: ResponseStatus::Error, seq: 0 },
@@ -134,7 +124,6 @@ pub fn router_error(request_id: Uuid, status: ResponseStatus, message: &str) -> 
     )
 }
 
-/// Build a stream chunk response.
 pub fn stream_chunk(request_id: Uuid, seq: u32, payload: &[u8]) -> Bytes {
     build_response(
         &ResponseHeader { v: 1, id: request_id, status: ResponseStatus::StreamChunk, seq },
@@ -142,7 +131,6 @@ pub fn stream_chunk(request_id: Uuid, seq: u32, payload: &[u8]) -> Bytes {
     )
 }
 
-/// Build a stream end response.
 pub fn stream_end(request_id: Uuid, seq: u32, payload: &[u8]) -> Bytes {
     build_response(
         &ResponseHeader { v: 1, id: request_id, status: ResponseStatus::StreamEnd, seq },

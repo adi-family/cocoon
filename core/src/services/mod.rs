@@ -1,8 +1,3 @@
-//! ADI Service implementations for cocoon
-//!
-//! This module contains service implementations that can be registered
-//! with the AdiRouter to handle requests from the web app.
-
 #[cfg(feature = "tasks-core")]
 pub mod tasks;
 

@@ -1,5 +1,3 @@
-//! Interactive CLI mode.
-
 use crate::runtime::{CocoonInfo, CocoonStatus, RuntimeManager, RuntimeType};
 use lib_console_output::{
     out_error, out_info, out_success, out_warn, theme, Columns, Confirm, Input, KeyValue, List,
@@ -127,7 +125,6 @@ pub fn run_interactive(manager: &RuntimeManager) -> Result<(), String> {
     Ok(())
 }
 
-/// Build a SelectOption from a CocoonInfo.
 fn cocoon_option(info: &CocoonInfo) -> SelectOption<String> {
     let icon = info.status_icon();
     let styled_icon = match &info.status {
@@ -140,7 +137,6 @@ fn cocoon_option(info: &CocoonInfo) -> SelectOption<String> {
     SelectOption::new(label, info.name.clone())
 }
 
-/// Handle list command
 pub fn handle_list(manager: &RuntimeManager) -> Result<(), String> {
     let cocoons = manager.list_all()?;
 
@@ -167,7 +163,6 @@ pub fn handle_list(manager: &RuntimeManager) -> Result<(), String> {
     Ok(())
 }
 
-/// Select a cocoon interactively
 fn select_cocoon(manager: &RuntimeManager, prompt: &str) -> Result<CocoonInfo, String> {
     let cocoons = manager.list_all()?;
 
@@ -188,7 +183,6 @@ fn select_cocoon(manager: &RuntimeManager, prompt: &str) -> Result<CocoonInfo, S
         .ok_or_else(|| "Cocoon not found".to_string())
 }
 
-/// Handle status command interactively
 fn handle_status_interactive(manager: &RuntimeManager) -> Result<(), String> {
     let cocoon = select_cocoon(manager, "Select cocoon to check status:")?;
     let runtime = manager.get_runtime(cocoon.runtime);
@@ -216,7 +210,6 @@ fn handle_status_interactive(manager: &RuntimeManager) -> Result<(), String> {
     Ok(())
 }
 
-/// Handle start command interactively
 fn handle_start_interactive(manager: &RuntimeManager) -> Result<(), String> {
     let cocoon = select_cocoon(manager, "Select cocoon to start:")?;
     let runtime = manager.get_runtime(cocoon.runtime);
@@ -228,7 +221,6 @@ fn handle_start_interactive(manager: &RuntimeManager) -> Result<(), String> {
     Ok(())
 }
 
-/// Handle stop command interactively
 fn handle_stop_interactive(manager: &RuntimeManager) -> Result<(), String> {
     let cocoon = select_cocoon(manager, "Select cocoon to stop:")?;
     let runtime = manager.get_runtime(cocoon.runtime);
@@ -240,7 +232,6 @@ fn handle_stop_interactive(manager: &RuntimeManager) -> Result<(), String> {
     Ok(())
 }
 
-/// Handle restart command interactively
 fn handle_restart_interactive(manager: &RuntimeManager) -> Result<(), String> {
     let cocoon = select_cocoon(manager, "Select cocoon to restart:")?;
     let runtime = manager.get_runtime(cocoon.runtime);
@@ -252,7 +243,6 @@ fn handle_restart_interactive(manager: &RuntimeManager) -> Result<(), String> {
     Ok(())
 }
 
-/// Handle logs command interactively
 fn handle_logs_interactive(manager: &RuntimeManager) -> Result<(), String> {
     let cocoon = select_cocoon(manager, "Select cocoon to view logs:")?;
     let runtime = manager.get_runtime(cocoon.runtime);
@@ -267,7 +257,6 @@ fn handle_logs_interactive(manager: &RuntimeManager) -> Result<(), String> {
     Ok(())
 }
 
-/// Handle update command interactively
 fn handle_update_interactive(manager: &RuntimeManager) -> Result<(), String> {
     let cocoon = select_cocoon(manager, "Select cocoon to update:")?;
     let runtime = manager.get_runtime(cocoon.runtime);
@@ -292,7 +281,6 @@ fn handle_update_interactive(manager: &RuntimeManager) -> Result<(), String> {
     Ok(())
 }
 
-/// Handle check-update command interactively
 fn handle_check_update_interactive(manager: &RuntimeManager) -> Result<(), String> {
     let cocoon = select_cocoon(manager, "Select cocoon to check for updates:")?;
     let runtime = manager.get_runtime(cocoon.runtime);
@@ -303,7 +291,6 @@ fn handle_check_update_interactive(manager: &RuntimeManager) -> Result<(), Strin
     Ok(())
 }
 
-/// Handle remove command interactively
 fn handle_remove_interactive(manager: &RuntimeManager) -> Result<(), String> {
     let cocoon = select_cocoon(manager, "Select cocoon to remove:")?;
     let runtime = manager.get_runtime(cocoon.runtime);
@@ -330,7 +317,6 @@ fn handle_remove_interactive(manager: &RuntimeManager) -> Result<(), String> {
     Ok(())
 }
 
-/// Handle create command interactively
 fn handle_create_interactive(manager: &RuntimeManager) -> Result<(), String> {
     let runtimes = manager.available_runtimes();
 
@@ -363,7 +349,6 @@ fn handle_create_interactive(manager: &RuntimeManager) -> Result<(), String> {
     }
 }
 
-/// Create a Docker cocoon interactively
 fn create_docker_cocoon_interactive() -> Result<(), String> {
     let name = Input::new("Container name:")
         .default("cocoon-worker")
@@ -379,7 +364,6 @@ fn create_docker_cocoon_interactive() -> Result<(), String> {
         .run()
         .ok_or_else(|| "Cancelled".to_string())?;
 
-    // Build docker run command
     let mut docker_cmd = std::process::Command::new("docker");
     docker_cmd
         .arg("run")
@@ -432,7 +416,6 @@ fn create_docker_cocoon_interactive() -> Result<(), String> {
     }
 }
 
-/// Create a Machine (native service) cocoon interactively
 fn create_machine_cocoon_interactive() -> Result<(), String> {
     let signaling_url = Input::new("Signaling server URL:")
         .default("ws://localhost:8080/ws")
@@ -457,7 +440,6 @@ fn create_machine_cocoon_interactive() -> Result<(), String> {
     Ok(())
 }
 
-/// Print help text
 fn print_help() {
     Section::new("Cocoon Interactive Mode - Help").print();
 

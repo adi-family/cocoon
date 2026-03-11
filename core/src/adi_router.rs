@@ -52,7 +52,6 @@ pub enum AdiHandleResult {
     Stream(mpsc::Receiver<(Bytes, bool)>),
 }
 
-/// Error from service handler
 #[derive(Debug, Clone)]
 pub struct AdiServiceError {
     pub code: String,
@@ -168,7 +167,6 @@ pub struct ActiveSubscription {
     pub event: String,
 }
 
-/// Router that dispatches ADI requests to registered plugins.
 pub struct AdiRouter {
     plugins: HashMap<String, Arc<dyn AdiService>>,
     subscriptions: Arc<RwLock<HashMap<Uuid, ActiveSubscription>>>,
@@ -396,13 +394,11 @@ pub enum AdiRouterBinaryResult {
     },
 }
 
-/// Helper to create a streaming sender/receiver pair.
 pub fn create_stream_channel(buffer_size: usize) -> (StreamSender, mpsc::Receiver<(Bytes, bool)>) {
     let (tx, rx) = mpsc::channel(buffer_size);
     (StreamSender { tx }, rx)
 }
 
-/// Sender for streaming responses.
 pub struct StreamSender {
     tx: mpsc::Sender<(Bytes, bool)>,
 }
@@ -413,7 +409,6 @@ impl StreamSender {
         self.tx.send((data, false)).await.map_err(|_| ())
     }
 
-    /// Send the final chunk.
     pub async fn send_final(&self, data: Bytes) -> Result<(), ()> {
         self.tx.send((data, true)).await.map_err(|_| ())
     }
@@ -527,7 +522,6 @@ mod tests {
         let result = router.handle_binary(&AdiCallerContext::anonymous(), &frame).await;
         match result {
             AdiRouterBinaryResult::Single(response_frame) => {
-                // Parse response frame
                 let header_len = u32::from_be_bytes([
                     response_frame[0], response_frame[1], response_frame[2], response_frame[3],
                 ]) as usize;

@@ -110,13 +110,11 @@ enum SilkResponse {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum CommandRequest {
-    /// Execute a simple command (non-interactive)
     Execute {
         command: String,
         input: Option<String>,
     },
 
-    /// Attach a PTY session (interactive terminal)
     AttachPty {
         command: String,
         cols: u16,
@@ -125,7 +123,6 @@ enum CommandRequest {
         env: HashMap<String, String>,
     },
 
-    /// Send input to PTY session
     PtyInput { session_id: Uuid, data: String },
 
     /// Resize PTY terminal (remote controls size)
@@ -135,10 +132,8 @@ enum CommandRequest {
         rows: u16,
     },
 
-    /// Close PTY session
     PtyClose { session_id: Uuid },
 
-    /// Proxy HTTP request to local service
     ProxyHttp {
         request_id: String,
         service_name: String,
@@ -148,15 +143,12 @@ enum CommandRequest {
         body: Option<String>,
     },
 
-    /// Query local data (for aggregation)
     QueryLocal {
         query_id: String,
         query_type: QueryType,
         params: JsonValue,
     },
 
-    // ========== Silk Terminal Commands ==========
-    /// Create a new Silk session
     SilkCreateSession {
         #[serde(skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
@@ -166,7 +158,6 @@ enum CommandRequest {
         shell: Option<String>,
     },
 
-    /// Execute command in Silk session
     SilkExecute {
         session_id: Uuid,
         command: String,
@@ -180,7 +171,6 @@ enum CommandRequest {
         data: String,
     },
 
-    /// Resize Silk interactive terminal
     SilkResize {
         session_id: Uuid,
         command_id: String,
@@ -188,14 +178,12 @@ enum CommandRequest {
         rows: u16,
     },
 
-    /// Close Silk session
     SilkCloseSession { session_id: Uuid },
 }
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum CommandResponse {
-    /// Result of Execute command
     ExecuteResult {
         success: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -206,16 +194,12 @@ enum CommandResponse {
         files: Vec<OutputFile>,
     },
 
-    /// PTY session created successfully
     PtyCreated { session_id: Uuid },
 
-    /// Output from PTY session (synced in real-time)
     PtyOutput { session_id: Uuid, data: String },
 
-    /// PTY session exited
     PtyExited { session_id: Uuid, exit_code: i32 },
 
-    /// HTTP proxy result
     ProxyResult {
         request_id: String,
         status_code: u16,
@@ -223,17 +207,14 @@ enum CommandResponse {
         body: Option<String>,
     },
 
-    /// Query result (for aggregation)
     QueryResult {
         query_id: String,
         data: JsonValue,
         is_final: bool,
     },
 
-    /// Error response
     Error { code: String, message: String },
 
-    /// Silk terminal response (wraps SilkResponse)
     #[serde(untagged)]
     SilkResponse(SilkResponse),
 }
@@ -416,7 +397,6 @@ async fn create_pty_session(
     cmd.arg("-c");
     cmd.arg(command);
 
-    // Set environment variables
     for (key, value) in env {
         cmd.env(key, value);
     }
@@ -429,7 +409,6 @@ async fn create_pty_session(
         .spawn_command(cmd)
         .map_err(|e| format!("Failed to spawn command: {}", e))?;
 
-    // Spawn reader task to stream output in real-time
     let mut reader = pair
         .master
         .try_clone_reader()
@@ -440,7 +419,7 @@ async fn create_pty_session(
         let mut buffer = [0u8; 4096];
         loop {
             match reader.read(&mut buffer) {
-                Ok(0) => break, // EOF
+                Ok(0) => break,
                 Ok(n) => {
                     let data = String::from_utf8_lossy(&buffer[..n]).to_string();
                     let response = CommandResponse::PtyOutput {
@@ -453,7 +432,6 @@ async fn create_pty_session(
                             .expect("CommandResponse serialization cannot fail"),
                     };
 
-                    // Send output to client (non-blocking)
                     let writer_clone = writer.clone();
                     tokio::spawn(async move {
                         let mut w = writer_clone.lock().await;
@@ -475,7 +453,6 @@ async fn create_pty_session(
         tracing::info!("PTY session {} reader task ended", session_id_clone);
     });
 
-    // Take the writer once and store it
     let pty_writer = pair
         .master
         .take_writer()
@@ -492,7 +469,6 @@ async fn create_pty_session(
     ))
 }
 
-/// Handle HTTP proxy request to local service
 async fn handle_proxy_request(
     request_id: String,
     service_name: String,
@@ -502,7 +478,6 @@ async fn handle_proxy_request(
     body: Option<String>,
     services: &HashMap<String, u16>,
 ) -> CommandResponse {
-    // Look up service port in registry
     let port = match services.get(&service_name) {
         Some(port) => *port,
         None => {
@@ -516,14 +491,11 @@ async fn handle_proxy_request(
         }
     };
 
-    // Build the target URL
     let url = format!("http://localhost:{}{}", port, path);
     tracing::debug!("Proxying {} {} to {}", method, path, url);
 
-    // Create HTTP client
     let client = reqwest::Client::new();
 
-    // Parse method
     let http_method = match method.to_uppercase().as_str() {
         "GET" => reqwest::Method::GET,
         "POST" => reqwest::Method::POST,
@@ -543,20 +515,16 @@ async fn handle_proxy_request(
         }
     };
 
-    // Build request
     let mut request_builder = client.request(http_method, &url);
 
-    // Add headers
     for (key, value) in headers {
         request_builder = request_builder.header(&key, &value);
     }
 
-    // Add body if present
     if let Some(body_str) = body {
         request_builder = request_builder.body(body_str);
     }
 
-    // Send request with timeout
     match request_builder
         .timeout(std::time::Duration::from_secs(30))
         .send()
@@ -566,14 +534,12 @@ async fn handle_proxy_request(
             let status_code = response.status().as_u16();
             let mut response_headers = HashMap::new();
 
-            // Convert headers to HashMap
             for (key, value) in response.headers() {
                 if let Ok(value_str) = value.to_str() {
                     response_headers.insert(key.to_string(), value_str.to_string());
                 }
             }
 
-            // Read response body
             let response_body = match response.text().await {
                 Ok(text) => Some(text),
                 Err(e) => {
@@ -601,7 +567,6 @@ async fn handle_proxy_request(
     }
 }
 
-/// Handle local query for aggregation
 async fn handle_query_local(
     query_id: String,
     query_type: QueryType,
@@ -609,9 +574,6 @@ async fn handle_query_local(
 ) -> CommandResponse {
     match query_type {
         QueryType::ListTasks => {
-            // For now, return empty task list
-            // In production, this would query the local task store
-            // Integration with lib-task-store will come later
             tracing::debug!("Listing local tasks with params: {:?}", params);
 
             CommandResponse::QueryResult {
@@ -681,7 +643,6 @@ async fn handle_query_local(
     }
 }
 
-/// Validate secret strength
 fn validate_secret(secret: &str) -> Result<(), String> {
     if secret.len() < MIN_SECRET_LENGTH {
         return Err(format!(
@@ -691,7 +652,6 @@ fn validate_secret(secret: &str) -> Result<(), String> {
         ));
     }
 
-    // Check for obvious weak patterns
     if secret.chars().all(|c| c.is_numeric()) {
         return Err("Secret must not be only numbers".to_string());
     }
@@ -704,7 +664,6 @@ fn validate_secret(secret: &str) -> Result<(), String> {
         return Err("Secret must not be repetitive characters".to_string());
     }
 
-    // Check for common weak patterns
     let lower = secret.to_lowercase();
     let weak_patterns = ["password", "secret", "admin", "12345", "qwerty", "test"];
     for pattern in &weak_patterns {
@@ -716,7 +675,6 @@ fn validate_secret(secret: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Generate cryptographically strong random secret
 fn generate_strong_secret() -> String {
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut rng = rand::rng();
@@ -729,7 +687,6 @@ fn generate_strong_secret() -> String {
         .collect()
 }
 
-/// Load device ID from file if it exists
 async fn load_device_id() -> Option<String> {
     match tokio::fs::read_to_string(DEVICE_ID_PATH).await {
         Ok(device_id) => {
@@ -745,7 +702,6 @@ async fn load_device_id() -> Option<String> {
     }
 }
 
-/// Save device ID to file for future reconnections
 async fn save_device_id(device_id: &str) {
     if let Err(e) = tokio::fs::write(DEVICE_ID_PATH, device_id).await {
         tracing::warn!("⚠️ Could not save device ID to {}: {}", DEVICE_ID_PATH, e);
@@ -758,7 +714,6 @@ async fn save_device_id(device_id: &str) {
     }
 }
 
-/// Send deregister message to signaling server
 async fn send_deregister(writer: &SharedWriter, device_id: &str, reason: Option<&str>) {
     let deregister_msg = SignalingMessage::DeviceDeregister {
         device_id: device_id.to_string(),
@@ -779,17 +734,13 @@ async fn send_deregister(writer: &SharedWriter, device_id: &str, reason: Option<
     }
 }
 
-/// Load or generate client secret for persistent device ID
-/// Returns (secret, optional_device_id)
 async fn get_or_create_secret() -> Result<(String, Option<String>), Box<dyn std::error::Error>> {
-    // Load device_id if it exists (for reconnection verification)
     let device_id = load_device_id().await;
 
     // Try environment variable first (for manual management)
     if let Some(secret) = env_opt(EnvVar::CocoonSecret.as_str()) {
         tracing::info!("📋 Using secret from COCOON_SECRET environment variable");
 
-        // Validate manual secret
         if let Err(e) = validate_secret(&secret) {
             tracing::error!("❌ Invalid secret from COCOON_SECRET: {}", e);
             tracing::error!("💡 Secret requirements:");
@@ -803,30 +754,24 @@ async fn get_or_create_secret() -> Result<(String, Option<String>), Box<dyn std:
         return Ok((secret, device_id));
     }
 
-    // Try loading from file
     match tokio::fs::read_to_string(SECRET_PATH).await {
         Ok(secret) => {
             let secret = secret.trim().to_string();
 
-            // Validate loaded secret
             if let Err(e) = validate_secret(&secret) {
                 tracing::error!("❌ Invalid secret from {}: {}", SECRET_PATH, e);
                 tracing::error!("💡 Deleting weak secret and generating new one");
                 let _ = tokio::fs::remove_file(SECRET_PATH).await;
                 // Also delete device_id since secret changed
                 let _ = tokio::fs::remove_file(DEVICE_ID_PATH).await;
-                // Fall through to generate new secret
             } else {
                 tracing::info!("🔑 Loaded existing secret from {}", SECRET_PATH);
                 return Ok((secret, device_id));
             }
         }
-        Err(_) => {
-            // File doesn't exist, will generate new secret
-        }
+        Err(_) => {}
     }
 
-    // Generate new cryptographically strong secret
     let secret = generate_strong_secret();
     tracing::info!(
         "🆕 Generated new cryptographically strong secret ({} chars, {} bits entropy)",
@@ -852,13 +797,11 @@ async fn get_or_create_secret() -> Result<(String, Option<String>), Box<dyn std:
     Ok((secret, None))
 }
 
-/// Handle WebRTC-related CocoonMessage variants received via SyncData
 async fn handle_cocoon_webrtc(
     msg: CocoonMessage,
     webrtc: Arc<crate::webrtc::WebRtcManager>,
     writer: SharedWriter,
 ) {
-    /// Helper to send a CocoonMessage wrapped in SyncData
     async fn send_cocoon_msg(writer: &SharedWriter, msg: &CocoonMessage) {
         let sync_msg = SignalingMessage::SyncData {
             payload: serde_json::to_value(msg).expect("CocoonMessage serialization cannot fail"),
@@ -980,7 +923,6 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("🐛 Cocoon starting (v{})", env!("CARGO_PKG_VERSION"));
 
-    // Get or create client secret and load device ID (for reconnection verification)
     let (secret, device_id) = get_or_create_secret().await?;
 
     let base_url = env_or(EnvVar::SignalingServerUrl.as_str(), "ws://localhost:8080/ws");
@@ -1003,14 +945,11 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (write, mut read) = ws_stream.split();
     let writer = Arc::new(Mutex::new(write));
 
-    // PTY sessions storage
     let pty_sessions: Arc<Mutex<HashMap<Uuid, PtySession>>> = Arc::new(Mutex::new(HashMap::new()));
 
-    // Silk sessions storage
     let silk_sessions: Arc<Mutex<HashMap<Uuid, SilkSession>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
-    // ADI plugin router - register plugins for WebRTC "adi" channel
     let adi_router = {
         let mut router = AdiRouter::new();
 
@@ -1070,16 +1009,13 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let adi_router = Arc::new(Mutex::new(adi_router));
 
-    // WebRTC signaling channel for sending messages back through WebSocket
     let (webrtc_tx, mut webrtc_rx) = tokio::sync::mpsc::unbounded_channel::<SignalingMessage>();
 
-    // WebRTC session manager with ADI router
     let webrtc_manager = Arc::new(crate::webrtc::WebRtcManager::with_adi_router(
         webrtc_tx,
         adi_router,
     ));
 
-    // Spawn task to forward WebRTC signaling messages to WebSocket
     let writer_for_webrtc = writer.clone();
     tokio::spawn(async move {
         while let Some(msg) = webrtc_rx.recv().await {
@@ -1128,11 +1064,9 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     let services = Arc::new(services);
 
-    // Check for tokens (one-command install flow)
     let setup_token = env_opt(EnvVar::CocoonSetupToken.as_str());
     let cocoon_name = env_opt(EnvVar::CocoonName.as_str());
 
-    // Build DeviceRegister message
     let cocoon_version = env!("CARGO_PKG_VERSION").to_string();
     let mut tags = std::collections::HashMap::new();
     if let Some(ref token) = setup_token {
@@ -1160,7 +1094,6 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         device_config,
     };
 
-    // Track current device ID for deregistration
     let current_device_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
     // Send DeviceRegister immediately (cocoon endpoint skips auth)
@@ -1174,7 +1107,6 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("Failed to send register: {}", e))?;
     }
 
-    // Wait for DeviceRegisterResponse
     let mut registered = false;
     while let Some(Ok(msg)) = read.next().await {
         let text = match msg {
@@ -1220,12 +1152,10 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let current_device_id_for_loop = current_device_id.clone();
 
-    // Setup shutdown signal handling
     let (shutdown_tx, mut shutdown_rx) = broadcast::channel::<()>(1);
     let writer_for_shutdown = writer.clone();
     let device_id_for_shutdown = current_device_id.clone();
 
-    // Spawn signal handler task
     tokio::spawn(async move {
         #[cfg(unix)]
         {
@@ -1251,16 +1181,13 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             tracing::info!("📥 Received Ctrl+C, initiating graceful shutdown...");
         }
 
-        // Send deregister message before shutdown
         if let Some(device_id) = device_id_for_shutdown.lock().await.as_ref() {
             send_deregister(&writer_for_shutdown, device_id, Some("shutdown")).await;
         }
 
-        // Signal shutdown to main loop
         let _ = shutdown_tx.send(());
     });
 
-    // Main message loop
     loop {
         tokio::select! {
             _ = shutdown_rx.recv() => {
@@ -1305,8 +1232,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         tracing::info!("✅ Registration confirmed");
                         tracing::info!("🆔 Device ID: {}", assigned_id);
 
-                        // Check if tags contain owner info (auto-claim flow)
-                        if let Some(ref t) = tags {
+                            if let Some(ref t) = tags {
                             if let Some(owner_id) = t.get("owner_id") {
                                 tracing::info!("👤 Owner: {}", owner_id);
                                 if let Some(name) = t.get("name") {
@@ -1326,10 +1252,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         tracing::info!("");
 
-                        // Store device ID for deregistration
                         *current_device_id_for_loop.lock().await = Some(assigned_id.clone());
-
-                        // Save device_id for future reconnections (enables verification)
                         save_device_id(&assigned_id).await;
                     }
 
@@ -1338,7 +1261,6 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     SignalingMessage::SyncData { payload } => {
-                        // Try parsing as CocoonMessage first (for WebRTC signaling)
                         let type_str = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
                         if type_str.starts_with("webrtc_") {
                             match serde_json::from_value::<CocoonMessage>(payload) {
@@ -1509,7 +1431,6 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                             Some(handle_query_local(query_id, query_type, params).await)
                         }
 
-                        // ========== Silk Terminal Commands ==========
                         CommandRequest::SilkCreateSession { cwd, env, shell } => {
                             tracing::info!("🧵 Creating Silk session");
                             match SilkSession::new(cwd, env, shell) {
@@ -1545,8 +1466,6 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 match session.execute(&command, command_id.clone()) {
                                     Ok((interactive, child_opt)) => {
                                         if interactive {
-                                            // Need PTY for interactive command
-                                            // Create PTY session with the command
                                             drop(silk_sessions); // Release lock before async call
 
                                             let mut env = HashMap::new();
@@ -1570,7 +1489,6 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                                                         .await
                                                         .insert(pty_session_id, pty_session);
 
-                                                    // Update silk session with PTY info
                                                     if let Some(s) = silk_sessions_clone
                                                         .lock()
                                                         .await
@@ -1607,13 +1525,11 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                                                 )),
                                             }
                                         } else if let Some(mut child) = child_opt {
-                                            // Non-interactive command - stream output
                                             let writer_for_output = writer_clone.clone();
                                             let sessions_for_cwd = silk_sessions_clone.clone();
                                             let cmd_for_cwd = command.clone();
                                             let command_id_for_spawn = command_id.clone();
 
-                                            // Send started message
                                             let started = SilkResponse::CommandStarted {
                                                 session_id,
                                                 command_id,
@@ -1635,7 +1551,6 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                                                 .await;
                                             drop(w);
 
-                                            // Store stdin for input forwarding
                                             if let Some(stdin) = child.stdin.take() {
                                                 let mut silk_lock = silk_sessions_clone.lock().await;
                                                 if let Some(session) = silk_lock.get_mut(&session_id) {
@@ -1645,7 +1560,6 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                                                 }
                                             }
 
-                                            // Spawn task to read output
                                             tokio::spawn(async move {
                                                 let command_id = command_id_for_spawn;
                                                 let mut stdout_reader = std::io::BufReader::new(
@@ -1655,7 +1569,6 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                                                     child.stderr.take().expect("child stderr is piped"),
                                                 );
 
-                                                // Read stdout in chunks
                                                 let mut buf = [0u8; 4096];
                                                 loop {
                                                     match stdout_reader.get_mut().read(&mut buf) {
@@ -1693,7 +1606,6 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                                                     }
                                                 }
 
-                                                // Read any remaining stderr
                                                 let mut stderr_buf = Vec::new();
                                                 let _ = stderr_reader.read_to_end(&mut stderr_buf);
                                                 if !stderr_buf.is_empty() {
@@ -1723,13 +1635,11 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                                                         .await;
                                                 }
 
-                                                // Wait for exit
                                                 let exit_code = child
                                                     .wait()
                                                     .map(|s| s.code().unwrap_or(-1))
                                                     .unwrap_or(-1);
 
-                                                // Update cwd if cd command
                                                 {
                                                     let mut sessions =
                                                         sessions_for_cwd.lock().await;
@@ -1800,7 +1710,6 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                             command_id,
                             data,
                         } => {
-                            // Forward input to PTY (interactive) or child stdin (non-interactive)
                             let mut silk_sessions = silk_sessions_clone.lock().await;
                             if let Some(session) = silk_sessions.get_mut(&session_id) {
                                 if let Some(cmd) = session.running_commands.get_mut(&command_id) {
@@ -1835,7 +1744,6 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                                             ))
                                         }
                                     } else if let Some(ref mut stdin) = cmd.stdin {
-                                        // Non-interactive command: write to child stdin
                                         use std::io::Write;
                                         if let Err(e) = writeln!(stdin, "{}", data) {
                                             Some(CommandResponse::SilkResponse(
@@ -1939,7 +1847,6 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     };
 
-                                // Send response (if any)
                                 if let Some(response) = response {
                                     let response_msg = SignalingMessage::SyncData {
                                         payload: serde_json::to_value(&response)
