@@ -33,7 +33,6 @@ pub mod filesystem;
 mod interactive;
 mod runtime;
 mod self_update;
-pub mod services;
 mod setup;
 pub mod silk;
 pub mod webrtc;

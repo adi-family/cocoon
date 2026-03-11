@@ -519,21 +519,6 @@ impl WebRtcManager {
                         }
 
                         if channel == "adi" {
-                            if let Ok(cocoon_msg) = serde_json::from_str::<CocoonMessage>(&data) {
-                                if let CocoonMessage::PluginInstallPlugin { request_id, plugin_id, registry, version } = cocoon_msg {
-                                    let dc = dc_for_response.clone();
-                                    tokio::spawn(async move {
-                                        let response = crate::services::plugin::handle_install(
-                                            request_id, plugin_id, registry, version,
-                                        ).await;
-                                        dc_send(&dc, &response).await;
-                                    });
-                                    return;
-                                }
-                            }
-                        }
-
-                        if channel == "adi" {
                             if let Some(router) = &adi_router {
                                 if let Ok(discovery) = serde_json::from_str::<AdiDiscovery>(&data) {
                                     let router_guard = router.lock().await;
