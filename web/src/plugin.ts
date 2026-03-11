@@ -1,8 +1,6 @@
-import '@adi-family/plugin-auth';
-import '@adi-family/plugin-signaling';
 import { AdiPlugin } from '@adi-family/sdk-plugin';
-import { AdiDebugScreenBusKey } from '@adi-family/plugin-debug-screen/bus';
-import { AdiSignalingBusKey, type DeviceInfo } from '@adi-family/plugin-signaling/bus';
+import { AdiDebugScreenBusKey } from '@adi-family/plugin-debug-screen';
+import { AdiSignalingBusKey, type DeviceInfo } from '@adi-family/plugin-signaling';
 import { CocoonBusKey, type ConnectionSettings } from '@adi-family/cocoon-plugin-interface';
 import { CocoonClient } from './cocoon-client';
 import { CocoonConnection } from './cocoon-connection';
@@ -10,7 +8,7 @@ import type { WebRTCConfig } from './cocoon-webrtc';
 import { PLUGIN_ID, PLUGIN_VERSION } from './config';
 import type { AdiCocoonDebugElement, CocoonDebugInfo } from './debug-section';
 import type { AdiCocoonListElement, CocoonListItem, SetupConnectEvent } from './component';
-import './bus';
+import './generated';
 
 interface RegistryPlugin {
   id: string;

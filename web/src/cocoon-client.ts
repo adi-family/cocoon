@@ -1,11 +1,11 @@
-import "@adi-family/plugin-signaling/bus";
+import "@adi-family/plugin-signaling";
 import { Logger, trace, type EventBus } from '@adi-family/sdk-plugin';
 import type { SilkResponse } from './silk-types';
 import { SilkSession } from './silk-session';
 import { CocoonWebRTC, type WebRTCConfig } from './cocoon-webrtc';
 import { CocoonConnection } from './cocoon-connection';
-import { CocoonBusKey } from './bus';
-import './bus';
+import { CocoonBusKey } from './generated/bus-types';
+import './generated/bus-events';
 
 export interface SyncDataSender {
   readonly url: string;

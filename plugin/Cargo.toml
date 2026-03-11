@@ -14,17 +14,17 @@ crate-type = ["cdylib"]
 cocoon-core = { path = "../core" }
 
 # Plugin SDK
-lib-plugin-prelude = { path = "../../_lib/lib-plugin-prelude" }
-lib-plugin-abi-v3 = { path = "../../_lib/lib-plugin-abi-v3" }
+lib-plugin-prelude = { path = "../../../crates/_lib/lib-plugin-prelude" }
+lib-plugin-abi-v3 = { path = "../../../crates/_lib/lib-plugin-abi-v3" }
 
 # Console output
-lib-console-output = { path = "../../_lib/lib-console-output" }
+lib-console-output = { path = "../../../crates/_lib/lib-console-output" }
 
 # Environment
-lib-env-parse = { path = "../../_lib/lib-env-parse" }
+lib-env-parse = { path = "../../../crates/_lib/lib-env-parse" }
 
 # Daemon client for adi daemon communication
-lib-daemon-client = { path = "../../_lib/lib-daemon-client" }
+lib-daemon-client = { path = "../../../crates/_lib/lib-daemon-client" }
 
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
@@ -40,6 +40,9 @@ anyhow = "1"
 
 # URL parsing (for docker cocoon creation)
 url = "2"
+
+[build-dependencies]
+lib-plugin-web-build = { path = "../../../crates/_lib/lib-plugin-web-build" }
 
 [package.metadata.plugin]
 id = "adi.cocoon"
@@ -64,6 +67,11 @@ description = "CLI commands for cocoon management"
 auto_start = false
 restart_on_failure = true
 max_restarts = 3
+
+[package.metadata.plugin.web_ui]
+entry = "web.js"
+sandbox = false
+plugin_class = "CocoonPlugin"
 
 [package.metadata.plugin.tags]
 categories = ["remote", "execution", "terminal", "pty"]

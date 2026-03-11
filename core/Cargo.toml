@@ -20,16 +20,16 @@ credentials-service = ["credentials-core", "sqlx"]
 
 [dependencies]
 # Environment
-lib-env-parse = { path = "../../_lib/lib-env-parse" }
+lib-env-parse = { path = "../../../crates/_lib/lib-env-parse" }
 
 # Console output
-lib-console-output = { path = "../../_lib/lib-console-output" }
+lib-console-output = { path = "../../../crates/_lib/lib-console-output" }
 
 # Daemon client
-lib-daemon-client = { path = "../../_lib/lib-daemon-client" }
+lib-daemon-client = { path = "../../../crates/_lib/lib-daemon-client" }
 
 # Signaling protocol
-lib-signaling-protocol = { path = "../../signaling/protocol" }
+lib-signaling-protocol = { path = "../../../crates/signaling/protocol" }
 
 # Core dependencies
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "fs", "process", "io-util", "sync", "signal", "time"] }
@@ -41,9 +41,9 @@ once_cell = "1"
 anyhow = "1"
 
 # ADI services (optional)
-tasks-core = { path = "../../tasks/core", optional = true }
-kb-core = { package = "knowledgebase-core", path = "../../knowledgebase/core", features = ["fastembed"], optional = true }
-credentials-core = { path = "../../../plugins/adi.credentials/core", optional = true }
+tasks-core = { path = "../../../crates/tasks/core", optional = true }
+kb-core = { package = "knowledgebase-core", path = "../../../crates/knowledgebase/core", features = ["fastembed"], optional = true }
+credentials-core = { path = "../../adi.credentials/core", optional = true }
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "json"], optional = true }
 
 bytes = "1"
@@ -73,7 +73,7 @@ tower-http = { version = "0.6", features = ["cors"] }
 hostname = "0.4"
 
 [build-dependencies]
-typespec-api = { package = "lib-typespec-api", path = "../../tsp-gen/core" }
+typespec-api = { package = "lib-typespec-api", path = "../../../crates/tsp-gen/core" }
 
 [dev-dependencies]
 tempfile = "3"
