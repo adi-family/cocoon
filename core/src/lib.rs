@@ -52,6 +52,9 @@ pub use tasks_core::TasksService;
 pub use interactive::{handle_list, run_interactive};
 pub use setup::run_setup;
 
+#[cfg(test)]
+mod e2e_tests;
+
 use lib_console_output::{out_info, out_success};
 use lib_env_parse::{env_opt, env_vars};
 use once_cell::sync::OnceCell;

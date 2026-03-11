@@ -819,9 +819,13 @@ async fn handle_cocoon_webrtc(
             session_id,
             device_id: client_id,
             user_id,
-            ..
+            data_channels,
         } => {
-            tracing::info!("🎥 WebRTC session request from {}: {} (user_id={:?})", client_id, session_id, user_id);
+            if let Some(ref channels) = data_channels {
+                tracing::info!("🎥 WebRTC session request from {}: {} (user_id={:?}, data_channels={:?})", client_id, session_id, user_id, channels);
+            } else {
+                tracing::info!("🎥 WebRTC session request from {}: {} (user_id={:?})", client_id, session_id, user_id);
+            }
             match webrtc.create_session(session_id.clone(), user_id).await {
                 Ok(()) => {
                     tracing::info!("✅ WebRTC session {} created", session_id);
@@ -1262,6 +1266,45 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     continue;
                                 }
                             }
+                        }
+
+                        // Handle query protocol messages (query_query_local → query_query_result)
+                        if type_str == "query_query_local" {
+                            let query_id = payload.get("query_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let params = payload.get("params").cloned().unwrap_or(serde_json::json!({}));
+
+                            let query_type: QueryType = match payload.get("query_type").cloned() {
+                                Some(v) => match serde_json::from_value(v) {
+                                    Ok(qt) => qt,
+                                    Err(e) => {
+                                        tracing::warn!("⚠️ Invalid query_type: {}", e);
+                                        continue;
+                                    }
+                                }
+                                None => {
+                                    tracing::warn!("⚠️ Missing query_type in query_query_local");
+                                    continue;
+                                }
+                            };
+
+                            let writer_clone = writer.clone();
+                            tokio::spawn(async move {
+                                let result = handle_query_local(query_id, query_type, params).await;
+                                if let CommandResponse::QueryResult { query_id, data, is_final } = result {
+                                    let response = serde_json::json!({
+                                        "type": "query_query_result",
+                                        "query_id": query_id,
+                                        "data": data,
+                                        "is_final": is_final,
+                                    });
+                                    let sync_msg = SignalingMessage::SyncData { payload: response };
+                                    let mut w = writer_clone.lock().await;
+                                    let _ = w.send(Message::Text(
+                                        serde_json::to_string(&sync_msg).expect("serialization cannot fail"),
+                                    )).await;
+                                }
+                            });
+                            continue;
                         }
 
                         let request: CommandRequest = match serde_json::from_value(payload) {

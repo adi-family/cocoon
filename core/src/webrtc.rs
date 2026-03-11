@@ -533,8 +533,77 @@ impl WebRtcManager {
                                     return;
                                 }
 
-                                // Text frames on "adi" that aren't discovery are ignored
-                                // (all service requests use binary framing now)
+                                // Try plugin install request
+                                if let Ok(msg) = serde_json::from_str::<CocoonMessage>(&data) {
+                                    if let CocoonMessage::PluginInstallPlugin { request_id, plugin_id, registry, version } = msg {
+                                        let dc = dc_for_response.clone();
+                                        tokio::spawn(async move {
+                                            tracing::info!("📦 Installing plugin: {} (registry={:?}, version={:?})", plugin_id, registry, version);
+
+                                            let exe = match std::env::current_exe() {
+                                                Ok(p) => p,
+                                                Err(e) => {
+                                                    let err = CocoonMessage::PluginInstallError {
+                                                        request_id,
+                                                        plugin_id,
+                                                        code: "exe_not_found".to_string(),
+                                                        message: format!("Failed to get current exe: {}", e),
+                                                    };
+                                                    if let Ok(json) = serde_json::to_string(&err) {
+                                                        let _ = dc.send(&json.into_bytes().into()).await;
+                                                    }
+                                                    return;
+                                                }
+                                            };
+
+                                            let mut cmd = tokio::process::Command::new(&exe);
+                                            cmd.arg("plugin").arg("install").arg(&plugin_id);
+                                            if let Some(ref reg) = registry {
+                                                cmd.arg("--registry").arg(reg);
+                                            }
+                                            if let Some(ref ver) = version {
+                                                cmd.arg("--version").arg(ver);
+                                            }
+
+                                            let output = cmd.output().await;
+
+                                            let response = match output {
+                                                Ok(out) => {
+                                                    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                                                    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                                                    let success = out.status.success();
+                                                    if success {
+                                                        tracing::info!("✅ Plugin {} installed successfully", plugin_id);
+                                                    } else {
+                                                        tracing::warn!("⚠️ Plugin {} install failed: {}", plugin_id, stderr.trim());
+                                                    }
+                                                    CocoonMessage::PluginInstallPluginResponse {
+                                                        request_id,
+                                                        success,
+                                                        plugin_id,
+                                                        stdout,
+                                                        stderr,
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    tracing::error!("❌ Plugin install command failed: {}", e);
+                                                    CocoonMessage::PluginInstallError {
+                                                        request_id,
+                                                        plugin_id,
+                                                        code: "install_failed".to_string(),
+                                                        message: e.to_string(),
+                                                    }
+                                                }
+                                            };
+
+                                            if let Ok(json) = serde_json::to_string(&response) {
+                                                let _ = dc.send(&json.into_bytes().into()).await;
+                                            }
+                                        });
+                                        return;
+                                    }
+                                }
+
                                 tracing::warn!("⚠️ Unrecognized text message on adi channel: {}",
                                     &data[..data.len().min(200)]);
                             } else {
