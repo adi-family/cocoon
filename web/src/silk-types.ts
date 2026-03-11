@@ -1,8 +1,6 @@
-// Re-export generated types as the single source of truth
 export type { SilkStream, SilkSignal, SilkHtmlSpan } from './generated';
 export type { SignalingMessage as CocoonMessage } from './generated';
 
-// Extract silk-specific message subsets for typed usage
 import type { SignalingMessage } from './generated';
 
 type ExtractSilk<T extends SignalingMessage, P extends string> = T extends { type: `silk_${P}` } ? T : never;

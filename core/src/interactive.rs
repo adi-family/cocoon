@@ -6,7 +6,6 @@ use lib_console_output::{
     Renderable, Section, Select, SelectOption,
 };
 
-/// Actions available in interactive mode
 #[derive(Debug, Clone)]
 enum InteractiveAction {
     List,
@@ -23,7 +22,6 @@ enum InteractiveAction {
     Exit,
 }
 
-/// Build the action menu options.
 fn action_options() -> Vec<SelectOption<InteractiveAction>> {
     vec![
         SelectOption::new("list", InteractiveAction::List)
@@ -53,7 +51,6 @@ fn action_options() -> Vec<SelectOption<InteractiveAction>> {
     ]
 }
 
-/// Run interactive mode
 pub fn run_interactive(manager: &RuntimeManager) -> Result<(), String> {
     out_info!("Cocoon Interactive Mode");
 

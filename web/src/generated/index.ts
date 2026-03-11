@@ -1,6 +1,8 @@
 /**
  * Auto-generated from TypeSpec.
+ * DO NOT EDIT.
  */
 
-export * from './types';
-export * from './messages';
+export * from './models';
+export * from './enums';
+export * as adiClient from './adi-client';

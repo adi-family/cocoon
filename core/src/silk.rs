@@ -70,23 +70,19 @@ pub struct RunningCommand {
 }
 
 impl SilkSession {
-    /// Create a new Silk session
     pub fn new(
         cwd: Option<String>,
         env: HashMap<String, String>,
         shell: Option<String>,
     ) -> Result<Self, String> {
-        // Determine shell to use
         let shell = shell
             .or_else(|| env_opt(EnvVar::Shell.as_str()))
             .unwrap_or_else(|| "/bin/sh".to_string());
 
-        // Determine working directory
         let cwd = cwd
             .or_else(|| env_opt(EnvVar::Home.as_str()))
             .unwrap_or_else(|| "/".to_string());
 
-        // Verify shell exists
         if !std::path::Path::new(&shell).exists() {
             return Err(format!("Shell not found: {}", shell));
         }
@@ -107,14 +103,12 @@ impl SilkSession {
     pub fn is_interactive_command(command: &str) -> bool {
         let cmd_name = command.split_whitespace().next().unwrap_or("");
 
-        // Check against known interactive commands
         for interactive in INTERACTIVE_COMMANDS {
             if cmd_name == *interactive || cmd_name.ends_with(&format!("/{}", interactive)) {
                 return true;
             }
         }
 
-        // Check for common patterns
         if command.contains(" -i") || command.contains(" --interactive") {
             return true;
         }
@@ -152,7 +146,6 @@ impl SilkSession {
         cmd.arg("-c").arg(command);
         cmd.current_dir(&self.cwd);
 
-        // Set environment
         for (key, value) in &self.env {
             cmd.env(key, value);
         }
@@ -203,21 +196,18 @@ impl SilkSession {
                 format!("{}/{}", self.cwd, path)
             };
 
-            // Normalize path
             if let Ok(canonical) = std::fs::canonicalize(&path) {
                 self.cwd = canonical.to_string_lossy().to_string();
             }
         }
     }
 
-    /// Set PTY session ID for interactive command
     pub fn set_pty_session(&mut self, command_id: String, pty_session_id: Uuid) {
         if let Some(cmd) = self.running_commands.get_mut(&command_id) {
             cmd.pty_session_id = Some(pty_session_id);
         }
     }
 
-    /// Remove completed command
     pub fn complete_command(&mut self, command_id: String) {
         self.running_commands.remove(&command_id);
     }
@@ -238,7 +228,6 @@ impl AnsiToHtml {
 
         while let Some(ch) = chars.next() {
             if ch == '\x1b' {
-                // Flush current text
                 if !current_text.is_empty() {
                     spans.push(SilkHtmlSpan {
                         text: current_text.clone(),
@@ -271,7 +260,6 @@ impl AnsiToHtml {
             }
         }
 
-        // Flush remaining text
         if !current_text.is_empty() {
             spans.push(SilkHtmlSpan {
                 text: current_text,
@@ -286,7 +274,6 @@ impl AnsiToHtml {
     /// Parse SGR (Select Graphic Rendition) codes
     fn parse_sgr(code: &str, styles: &mut HashMap<String, String>, classes: &mut Vec<String>) {
         if code.is_empty() || code == "0" {
-            // Reset
             styles.clear();
             classes.clear();
             return;
@@ -312,7 +299,6 @@ impl AnsiToHtml {
                 "9" => {
                     classes.push("strikethrough".to_string());
                 }
-                // Foreground colors
                 "30" => {
                     styles.insert("color".to_string(), "#000000".to_string());
                 }
@@ -337,7 +323,6 @@ impl AnsiToHtml {
                 "37" => {
                     styles.insert("color".to_string(), "#cccccc".to_string());
                 }
-                // Bright foreground colors
                 "90" => {
                     styles.insert("color".to_string(), "#555555".to_string());
                 }
@@ -362,7 +347,6 @@ impl AnsiToHtml {
                 "97" => {
                     styles.insert("color".to_string(), "#ffffff".to_string());
                 }
-                // Background colors
                 "40" => {
                     styles.insert("background-color".to_string(), "#000000".to_string());
                 }

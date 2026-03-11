@@ -1,6 +1,6 @@
 /**
  * Auto-generated plugin types.
- * Import via: import '@adi-family/plugin-cocoon'
+ * Import via: import '@adi-family/plugin-xxx'
  * DO NOT EDIT.
  */
 

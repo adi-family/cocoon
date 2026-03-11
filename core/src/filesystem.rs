@@ -9,21 +9,15 @@ use std::time::SystemTime;
 use tokio::fs;
 use walkdir::WalkDir;
 
-// =============================================================================
-// Request Types
-// =============================================================================
-
 /// File system request messages (from web client)
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FileSystemRequest {
-    /// List directory contents
     FsListDir {
         request_id: String,
         path: String,
     },
 
-    /// Read file content
     FsReadFile {
         request_id: String,
         path: String,
@@ -33,13 +27,11 @@ pub enum FileSystemRequest {
         limit: Option<u64>,
     },
 
-    /// Get file/directory stats
     FsStat {
         request_id: String,
         path: String,
     },
 
-    /// Walk directory tree recursively
     FsWalk {
         request_id: String,
         path: String,
@@ -50,22 +42,16 @@ pub enum FileSystemRequest {
     },
 }
 
-// =============================================================================
-// Response Types
-// =============================================================================
-
 /// File system response messages (to web client)
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FileSystemResponse {
-    /// Directory listing result
     FsDirListing {
         request_id: String,
         path: String,
         entries: Vec<FileEntry>,
     },
 
-    /// File content result
     FsFileContent {
         request_id: String,
         path: String,
@@ -74,14 +60,12 @@ pub enum FileSystemResponse {
         total_size: u64,
     },
 
-    /// File stat result
     FsFileStat {
         request_id: String,
         path: String,
         stat: FileStat,
     },
 
-    /// Directory walk result
     FsWalkResult {
         request_id: String,
         path: String,
@@ -89,7 +73,6 @@ pub enum FileSystemResponse {
         truncated: bool,
     },
 
-    /// Error response
     FsError {
         request_id: String,
         code: String,
@@ -97,7 +80,6 @@ pub enum FileSystemResponse {
     },
 }
 
-/// Directory entry
 #[derive(Debug, Serialize)]
 pub struct FileEntry {
     pub name: String,
@@ -110,7 +92,6 @@ pub struct FileEntry {
     pub modified: Option<String>,
 }
 
-/// File statistics
 #[derive(Debug, Serialize)]
 pub struct FileStat {
     pub is_dir: bool,
@@ -125,7 +106,6 @@ pub struct FileStat {
     pub permissions: Option<u32>,
 }
 
-/// Walk entry (for recursive directory listing)
 #[derive(Debug, Serialize)]
 pub struct WalkEntry {
     pub path: String,
@@ -133,10 +113,6 @@ pub struct WalkEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
 }
-
-// =============================================================================
-// Helper Functions
-// =============================================================================
 
 /// Convert SystemTime to ISO 8601 string
 fn system_time_to_string(time: SystemTime) -> Option<String> {
@@ -178,11 +154,6 @@ fn is_text_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-// =============================================================================
-// File System Operations
-// =============================================================================
-
-/// Handle file system request and return response
 pub async fn handle_request(request: FileSystemRequest) -> FileSystemResponse {
     match request {
         FileSystemRequest::FsListDir { request_id, path } => {
@@ -206,7 +177,6 @@ pub async fn handle_request(request: FileSystemRequest) -> FileSystemResponse {
     }
 }
 
-/// List directory contents
 async fn list_directory(request_id: &str, path: &str) -> FileSystemResponse {
     let dir_path = Path::new(path);
 
@@ -283,7 +253,6 @@ async fn list_directory(request_id: &str, path: &str) -> FileSystemResponse {
     }
 }
 
-/// Read file content
 async fn read_file(
     request_id: &str,
     path: &str,
@@ -360,7 +329,6 @@ async fn read_file(
     }
 }
 
-/// Get file/directory statistics
 async fn get_stat(request_id: &str, path: &str) -> FileSystemResponse {
     let file_path = Path::new(path);
     
@@ -401,7 +369,6 @@ async fn get_stat(request_id: &str, path: &str) -> FileSystemResponse {
     }
 }
 
-/// Walk directory tree recursively
 async fn walk_directory(
     request_id: &str,
     path: &str,

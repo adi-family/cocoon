@@ -124,7 +124,6 @@ export class CocoonWebRTC {
     this.adiDc = this.pc.createDataChannel('adi');
     console.log(`[CocoonWebRTC] PC created, silk+adi DC created`);
 
-    // Log all PC state changes
     this.pc.onconnectionstatechange = () => {
       console.warn(`[CocoonWebRTC] PC connectionState=${this.pc!.connectionState} session=${this.sessionId}`);
     };

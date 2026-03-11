@@ -8,7 +8,6 @@ use std::fmt;
 
 use lib_daemon_client::DaemonClient;
 
-/// Runtime type for a cocoon instance
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeType {
     Docker,
@@ -34,7 +33,6 @@ impl RuntimeType {
     }
 }
 
-/// Status of a cocoon instance
 #[derive(Debug, Clone)]
 pub enum CocoonStatus {
     Running,
@@ -54,7 +52,6 @@ impl fmt::Display for CocoonStatus {
     }
 }
 
-/// Information about a cocoon instance
 #[derive(Debug, Clone)]
 pub struct CocoonInfo {
     pub name: String,
@@ -75,43 +72,19 @@ impl CocoonInfo {
     }
 }
 
-/// Trait for runtime backends
 pub trait Runtime {
-    /// List all cocoons for this runtime
     fn list(&self) -> Result<Vec<CocoonInfo>, String>;
-
-    /// Get status of a specific cocoon
     fn status(&self, name: &str) -> Result<CocoonInfo, String>;
-
-    /// Start a cocoon
     fn start(&self, name: &str) -> Result<String, String>;
-
-    /// Stop a cocoon
     fn stop(&self, name: &str) -> Result<String, String>;
-
-    /// Restart a cocoon
     fn restart(&self, name: &str) -> Result<String, String>;
-
-    /// Show logs for a cocoon
     fn logs(&self, name: &str, follow: bool, tail: Option<u32>) -> Result<(), String>;
-
-    /// Remove a cocoon
     fn remove(&self, name: &str, force: bool) -> Result<String, String>;
-
-    /// Check if this runtime is available on the system
     fn is_available(&self) -> bool;
-
-    /// Get runtime type
     fn runtime_type(&self) -> RuntimeType;
-
-    /// Update a cocoon to the latest version
     fn update(&self, name: &str) -> Result<String, String>;
-
-    /// Check for available updates
     fn check_update(&self, name: &str) -> Result<String, String>;
 }
-
-// === Docker Runtime ===
 
 pub struct DockerRuntime;
 
@@ -371,8 +344,6 @@ impl Runtime for DockerRuntime {
     }
 }
 
-// === Machine Runtime (via ADI daemon) ===
-
 const SERVICE_NAME: &str = "adi.cocoon";
 
 fn get_runtime() -> &'static tokio::runtime::Runtime {
@@ -564,8 +535,6 @@ impl Runtime for MachineRuntime {
     }
 }
 
-// === Unified Runtime Manager ===
-
 pub struct RuntimeManager {
     docker: DockerRuntime,
     machine: MachineRuntime,
@@ -579,7 +548,6 @@ impl RuntimeManager {
         }
     }
 
-    /// List all cocoons across all runtimes
     pub fn list_all(&self) -> Result<Vec<CocoonInfo>, String> {
         let mut all = Vec::new();
 
@@ -598,7 +566,6 @@ impl RuntimeManager {
         Ok(all)
     }
 
-    /// Get a runtime by type
     pub fn get_runtime(&self, runtime_type: RuntimeType) -> &dyn Runtime {
         match runtime_type {
             RuntimeType::Docker => &self.docker,
@@ -606,7 +573,6 @@ impl RuntimeManager {
         }
     }
 
-    /// Find a cocoon by name and return its runtime
     pub fn find_cocoon(&self, name: &str) -> Option<(CocoonInfo, RuntimeType)> {
         // Check Docker first
         if self.docker.is_available() {
@@ -625,7 +591,6 @@ impl RuntimeManager {
         None
     }
 
-    /// Get available runtimes
     pub fn available_runtimes(&self) -> Vec<RuntimeType> {
         let mut runtimes = Vec::new();
         if self.docker.is_available() {

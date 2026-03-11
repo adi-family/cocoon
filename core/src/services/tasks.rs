@@ -37,7 +37,6 @@ pub struct TasksService {
 }
 
 impl TasksService {
-    /// Create a new tasks service for a specific project
     pub fn new(project_path: &Path) -> Result<Self, String> {
         let manager = TaskManager::open(project_path)
             .map_err(|e| format!("Failed to open task manager: {}", e))?;
@@ -48,7 +47,6 @@ impl TasksService {
         })
     }
 
-    /// Create a new tasks service using global task storage
     pub fn new_global() -> Result<Self, String> {
         let manager = TaskManager::open_global()
             .map_err(|e| format!("Failed to open global task manager: {}", e))?;
@@ -59,7 +57,6 @@ impl TasksService {
         })
     }
 
-    /// Broadcast a task event to all subscribers
     fn broadcast_event(&self, event: &str, data: JsonValue) {
         let _ = self.event_tx.send(SubscriptionEvent {
             event: event.to_string(),
@@ -67,7 +64,6 @@ impl TasksService {
         });
     }
 
-    /// Helper to convert Task to JSON with consistent schema
     fn task_to_json(task: &Task) -> JsonValue {
         json!({
             "id": task.id.get(),
@@ -79,7 +75,6 @@ impl TasksService {
         })
     }
 
-    /// Handle list method
     async fn handle_list(&self, params: JsonValue) -> Result<AdiHandleResult, AdiServiceError> {
         let status_filter = params
             .get("status")
@@ -100,7 +95,6 @@ impl TasksService {
         Ok(AdiHandleResult::Success(json_to_bytes(json!(tasks))))
     }
 
-    /// Handle create method
     async fn handle_create(&self, params: JsonValue) -> Result<AdiHandleResult, AdiServiceError> {
         let title = params
             .get("title")
@@ -138,7 +132,6 @@ impl TasksService {
         Ok(AdiHandleResult::Success(json_to_bytes(json!({ "task_id": task_id.get() }))))
     }
 
-    /// Handle get method
     async fn handle_get(&self, params: JsonValue) -> Result<AdiHandleResult, AdiServiceError> {
         let task_id = params
             .get("task_id")
@@ -153,7 +146,6 @@ impl TasksService {
         Ok(AdiHandleResult::Success(json_to_bytes(json!(task_with_deps))))
     }
 
-    /// Handle update method
     async fn handle_update(&self, params: JsonValue) -> Result<AdiHandleResult, AdiServiceError> {
         let task_id = params
             .get("task_id")
@@ -205,7 +197,6 @@ impl TasksService {
         Ok(AdiHandleResult::Success(json_to_bytes(json!({ "task_id": task_id }))))
     }
 
-    /// Handle delete method
     async fn handle_delete(&self, params: JsonValue) -> Result<AdiHandleResult, AdiServiceError> {
         let task_id = params
             .get("task_id")
@@ -230,7 +221,6 @@ impl TasksService {
         Ok(AdiHandleResult::Success(json_to_bytes(json!({ "deleted": true }))))
     }
 
-    /// Handle search method
     async fn handle_search(&self, params: JsonValue) -> Result<AdiHandleResult, AdiServiceError> {
         let query = params
             .get("query")
@@ -250,7 +240,6 @@ impl TasksService {
         Ok(AdiHandleResult::Success(json_to_bytes(json!(tasks))))
     }
 
-    /// Handle ready method (tasks with no incomplete dependencies)
     async fn handle_ready(&self, _params: JsonValue) -> Result<AdiHandleResult, AdiServiceError> {
         let manager = self.manager.lock().await;
         let tasks = manager
@@ -260,7 +249,6 @@ impl TasksService {
         Ok(AdiHandleResult::Success(json_to_bytes(json!(tasks))))
     }
 
-    /// Handle blocked method
     async fn handle_blocked(&self, _params: JsonValue) -> Result<AdiHandleResult, AdiServiceError> {
         let manager = self.manager.lock().await;
         let tasks = manager
@@ -270,7 +258,6 @@ impl TasksService {
         Ok(AdiHandleResult::Success(json_to_bytes(json!(tasks))))
     }
 
-    /// Handle stats method
     async fn handle_stats(&self, _params: JsonValue) -> Result<AdiHandleResult, AdiServiceError> {
         let manager = self.manager.lock().await;
         let status = manager
@@ -280,7 +267,6 @@ impl TasksService {
         Ok(AdiHandleResult::Success(json_to_bytes(json!(status))))
     }
 
-    /// Handle add_dependency method
     async fn handle_add_dependency(
         &self,
         params: JsonValue,
@@ -305,7 +291,6 @@ impl TasksService {
         )))
     }
 
-    /// Handle remove_dependency method
     async fn handle_remove_dependency(
         &self,
         params: JsonValue,
@@ -328,7 +313,6 @@ impl TasksService {
         Ok(AdiHandleResult::Success(json_to_bytes(json!({ "removed": true }))))
     }
 
-    /// Handle detect_cycles method
     async fn handle_detect_cycles(
         &self,
         _params: JsonValue,
@@ -347,8 +331,6 @@ impl TasksService {
 
 #[async_trait]
 impl AdiService for TasksService {
-    // ========== Identity ==========
-
     fn plugin_id(&self) -> &str {
         "adi.tasks"
     }
@@ -365,8 +347,6 @@ impl AdiService for TasksService {
         Some("Manage tasks with dependencies, status tracking, and full-text search. Supports real-time subscriptions for task lifecycle events.")
     }
 
-    // ========== Capabilities ==========
-
     fn capabilities(&self) -> AdiPluginCapabilities {
         AdiPluginCapabilities {
             subscriptions: true,
@@ -374,8 +354,6 @@ impl AdiService for TasksService {
             streaming: true,
         }
     }
-
-    // ========== Methods ==========
 
     fn methods(&self) -> Vec<AdiMethodInfo> {
         vec![
@@ -633,8 +611,6 @@ impl AdiService for TasksService {
         ]
     }
 
-    // ========== Subscriptions ==========
-
     fn subscription_events(&self) -> Vec<SubscriptionEventInfo> {
         vec![
             SubscriptionEventInfo {
@@ -716,8 +692,6 @@ impl AdiService for TasksService {
         // Note: filtering by event name would be done by the caller
         Ok(self.event_tx.subscribe())
     }
-
-    // ========== Request Handling ==========
 
     async fn handle(
         &self,

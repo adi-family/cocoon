@@ -24,10 +24,6 @@ fn json_to_bytes(value: JsonValue) -> Bytes {
     Bytes::from(serde_json::to_vec(&value).unwrap())
 }
 
-// ============================================================================
-// Tool Types
-// ============================================================================
-
 /// Tool definition following MCP schema
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDef {
@@ -67,7 +63,6 @@ pub struct ToolResult {
 }
 
 impl ToolResult {
-    /// Create a successful text result
     pub fn text(content: impl Into<String>) -> Self {
         Self {
             content: content.into(),
@@ -77,7 +72,6 @@ impl ToolResult {
         }
     }
 
-    /// Create a successful JSON result
     pub fn json<T: Serialize>(data: &T) -> Result<Self, serde_json::Error> {
         Ok(Self {
             content: serde_json::to_string(data)?,
@@ -87,7 +81,6 @@ impl ToolResult {
         })
     }
 
-    /// Create an error result
     pub fn error(message: impl Into<String>) -> Self {
         Self {
             content: message.into(),
@@ -97,14 +90,12 @@ impl ToolResult {
         }
     }
 
-    /// Set execution duration
     pub fn with_duration(mut self, ms: u64) -> Self {
         self.duration_ms = Some(ms);
         self
     }
 }
 
-/// Tool content type
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ToolContentType {
@@ -113,7 +104,6 @@ pub enum ToolContentType {
     Json,
 }
 
-/// Tool category for organization
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolCategory {
@@ -128,33 +118,17 @@ pub enum ToolCategory {
     External,
 }
 
-// ============================================================================
-// Tool Provider Trait
-// ============================================================================
-
-/// Trait for tool providers
-///
 /// Implement this trait to add custom tools to the ToolsService.
 #[async_trait]
 pub trait ToolProvider: Send + Sync {
-    /// Provider identifier
     fn provider_id(&self) -> &str;
-
-    /// List all tools provided
     fn list_tools(&self) -> Vec<ToolDef>;
-
-    /// Execute a tool by name
     async fn call_tool(&self, name: &str, arguments: JsonValue) -> Result<ToolResult, String>;
 
-    /// Check if this provider handles a specific tool
     fn handles_tool(&self, name: &str) -> bool {
         self.list_tools().iter().any(|t| t.name == name)
     }
 }
-
-// ============================================================================
-// Built-in Tool Providers
-// ============================================================================
 
 /// Built-in shell tools
 pub struct ShellToolProvider {
@@ -603,10 +577,6 @@ impl ToolProvider for FileSystemToolProvider {
     }
 }
 
-// ============================================================================
-// MCP Server Tool Provider
-// ============================================================================
-
 /// Tool provider that connects to an MCP server via stdio
 pub struct McpServerProvider {
     /// Provider identifier
@@ -849,10 +819,6 @@ impl ToolProvider for McpServerProvider {
     }
 }
 
-// ============================================================================
-// Tools Service
-// ============================================================================
-
 /// Tools service for ADI router
 ///
 /// Aggregates tools from multiple providers and exposes them via the ADI protocol.
@@ -923,7 +889,6 @@ impl ToolsService {
             .collect()
     }
 
-    /// Handle list method
     async fn handle_list(&self, params: JsonValue) -> Result<AdiHandleResult, AdiServiceError> {
         let category_filter = params.get("category").and_then(|v| v.as_str());
 
@@ -943,7 +908,6 @@ impl ToolsService {
         Ok(AdiHandleResult::Success(json_to_bytes(json!(tools))))
     }
 
-    /// Handle call method
     async fn handle_call(&self, params: JsonValue) -> Result<AdiHandleResult, AdiServiceError> {
         let name = params
             .get("name")
@@ -974,7 +938,6 @@ impl ToolsService {
         }
     }
 
-    /// Handle get_schema method
     async fn handle_get_schema(
         &self,
         params: JsonValue,
@@ -999,7 +962,6 @@ impl ToolsService {
         }))))
     }
 
-    /// Handle providers method
     async fn handle_providers(&self, _params: JsonValue) -> Result<AdiHandleResult, AdiServiceError> {
         let providers: Vec<JsonValue> = self
             .providers

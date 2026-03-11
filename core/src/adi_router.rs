@@ -42,8 +42,6 @@ pub enum AdiSubscription {
     Error { request_id: Uuid, code: String, message: String },
 }
 
-// ── Core types (bytes-based) ──
-
 /// Result of handling a service request.
 ///
 /// Payloads are opaque bytes — the plugin decides the serialization format.
