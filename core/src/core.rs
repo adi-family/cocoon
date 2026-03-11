@@ -955,7 +955,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
         #[cfg(feature = "tasks-core")]
         {
-            match crate::services::TasksService::new_global() {
+            match tasks_core::TasksService::new_global() {
                 Ok(tasks_service) => {
                     router.register(std::sync::Arc::new(tasks_service));
                     tracing::info!("📦 Registered ADI plugin: adi.tasks");
@@ -968,7 +968,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
         #[cfg(feature = "kb-core")]
         {
-            match crate::services::KnowledgebaseService::new().await {
+            match knowledgebase_core::service::KnowledgebaseService::open_default().await {
                 Ok(kb_service) => {
                     router.register(std::sync::Arc::new(kb_service));
                     tracing::info!("📦 Registered ADI plugin: adi.knowledgebase");
@@ -979,24 +979,13 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        #[cfg(feature = "credentials-core")]
+        #[cfg(feature = "tools-core")]
         {
-            match crate::services::CredentialsService::from_env().await {
-                Ok(credentials_service) => {
-                    let wrapped = crate::services::CredentialsServiceAdi::new(credentials_service);
-                    router.register(std::sync::Arc::new(wrapped));
-                    tracing::info!("📦 Registered ADI plugin: adi.credentials");
-                }
-                Err(e) => {
-                    tracing::warn!("⚠️ Failed to initialize credentials plugin: {}", e);
-                }
-            }
+            let tools_service = tools_core::ToolsService::new();
+            let tool_count = tools_service.list_all_tools().len();
+            router.register(std::sync::Arc::new(tools_service));
+            tracing::info!("📦 Registered ADI plugin: adi.tools ({} tools)", tool_count);
         }
-
-        let tools_service = crate::services::ToolsService::new();
-        let tool_count = tools_service.list_all_tools().len();
-        router.register(std::sync::Arc::new(tools_service));
-        tracing::info!("📦 Registered ADI plugin: adi.tools ({} tools)", tool_count);
 
         router
     };

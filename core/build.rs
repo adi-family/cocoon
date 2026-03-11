@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 use typespec_api::codegen::{
     protocol::RustProtocolConfig,
-    rust::RustAdiServiceConfig,
     Generator, Language, Side,
 };
 
@@ -33,32 +32,4 @@ fn main() {
         dir = src_dir.display()
     );
     std::fs::write(format!("{out_dir}/generated_protocol.rs"), glue).unwrap();
-
-    // ── Credentials AdiService handler ──
-    let cred_tsp = "../../../plugins/adi.credentials/api.tsp";
-    println!("cargo:rerun-if-changed={cred_tsp}");
-
-    if let Ok(cred_source) = std::fs::read_to_string(cred_tsp) {
-        let cred_file = typespec_api::parse(&cred_source).expect("parse credentials api.tsp");
-
-        let cred_dir = PathBuf::from(&out_dir).join("credentials_adi");
-        let adi_config = RustAdiServiceConfig {
-            types_crate: "credentials_core".into(),
-            cocoon_crate: "crate".into(),
-            service_name: "Credentials".into(),
-            ..Default::default()
-        };
-
-        Generator::new(&cred_file, &cred_dir, "credentials")
-            .with_rust_adi_config(adi_config)
-            .generate(Language::Rust, Side::AdiService)
-            .expect("credentials adi codegen failed");
-
-        // Concatenate generated files into a single include!-able file
-        let adi_src = cred_dir.join("src/adi_service.rs");
-        if adi_src.exists() {
-            let content = std::fs::read_to_string(&adi_src).unwrap();
-            std::fs::write(format!("{out_dir}/credentials_adi_service.rs"), content).unwrap();
-        }
-    }
 }

@@ -2,7 +2,6 @@ pub mod protocol {
     include!(concat!(env!("OUT_DIR"), "/generated_protocol.rs"));
 }
 
-
 impl Default for protocol::types::AdiMethodInfo {
     fn default() -> Self {
         Self {
@@ -49,7 +48,7 @@ pub use silk::{AnsiToHtml, SilkSession};
 pub use webrtc::WebRtcManager;
 
 #[cfg(feature = "tasks-core")]
-pub use services::TasksService;
+pub use tasks_core::TasksService;
 
 pub use interactive::{handle_list, run_interactive};
 pub use setup::run_setup;
