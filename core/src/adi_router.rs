@@ -9,7 +9,7 @@
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use crate::adi_frame::{self, ResponseStatus};
+use crate::adi_frame::{self, RequestHeader, ResponseStatus};
 use crate::protocol::types::{AdiMethodInfo, AdiPluginCapabilities, AdiPluginInfo};
 use serde::{Serialize, Deserialize};
 use serde_json::Value as JsonValue;
